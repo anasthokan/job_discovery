@@ -1,0 +1,22 @@
+Jane Doe
+San Francisco, CA
+jane.doe@example.com
++1 (415) 555-0199
+https://linkedin.com/in/janedoe
+https://github.com/janedoe
+
+SUMMARY
+Backend engineer with 6 years of experience building APIs.
+
+SKILLS
+Python, FastAPI, Django, PostgreSQL, AWS, Docker
+
+EXPERIENCE
+Senior Software Engineer | Acme Corp | San Francisco, CA
+Jan 2022 - Present
+- Built APIs used by 2 million users
+
+EDUCATION
+B.S. in Computer Science
+Stanford University
+2014 - 2018

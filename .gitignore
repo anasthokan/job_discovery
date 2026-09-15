@@ -6,3 +6,4 @@ data/*.json
 *.egg-info/
 .idea/
 .vscode/
+uploads/
