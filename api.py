@@ -675,6 +675,8 @@ async def convert_pdf_to_docx(
         converted = pdf_to_docx(data, filename)
     except ConvertError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"PDF to DOCX failed: {exc}") from exc
     return _file_download(converted, _swap_extension(filename, ".docx"), DOCX_TYPE)
 
 
@@ -692,6 +694,8 @@ async def convert_docx_to_pdf(
         converted = docx_to_pdf(data, filename)
     except ConvertError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"DOCX to PDF failed: {exc}") from exc
     return _file_download(converted, _swap_extension(filename, ".pdf"), PDF_TYPE)
 
 
