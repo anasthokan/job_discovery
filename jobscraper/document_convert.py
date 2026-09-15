@@ -118,19 +118,17 @@ def _validate_upload(data: bytes, filename: str, expected: str) -> None:
 
     ext = _extension(filename)
     if expected == "pdf":
+        if data.startswith(b"%PDF"):
+            return
         if ext == ".doc":
             raise ConvertError("Old .doc is not supported. Save as PDF or DOCX first.", 415)
-        if ext and ext != ".pdf":
-            raise ConvertError("Upload a PDF file (.pdf).", 415)
-        if not ext and not data.startswith(b"%PDF"):
-            raise ConvertError("Upload a PDF file (.pdf).", 415)
-    elif expected == "docx":
+        raise ConvertError("Upload a PDF file (.pdf).", 415)
+    if expected == "docx":
+        if _looks_like_docx(data):
+            return
         if ext == ".doc":
             raise ConvertError("Old .doc is not supported. Save as DOCX or convert to PDF first.", 415)
-        if ext and ext != ".docx":
-            raise ConvertError("Upload a Word file (.docx).", 415)
-        if not ext and not _looks_like_docx(data):
-            raise ConvertError("Upload a Word file (.docx).", 415)
+        raise ConvertError("Upload a Word file (.docx).", 415)
 
 
 def _looks_like_docx(data: bytes) -> bool:

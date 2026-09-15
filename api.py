@@ -278,6 +278,49 @@ def _file_download(content: bytes, filename: str, media_type: str) -> Response:
     )
 
 
+def _extract_multipart_file(data: bytes) -> tuple[bytes, str, str] | None:
+    """Pull the first file part out of a raw multipart body (wrong Content-Type)."""
+    stripped = data.lstrip()
+    if not stripped.startswith(b"--"):
+        return None
+    boundary, _, _rest = stripped.partition(b"\n")
+    boundary = boundary.strip().rstrip(b"\r")
+    if len(boundary) < 4:
+        return None
+    for part in stripped.split(boundary):
+        part = part.lstrip(b"\r\n")
+        if b"filename=" not in part[:1200]:
+            continue
+        header, sep, body = part.partition(b"\r\n\r\n")
+        if not sep:
+            header, sep, body = part.partition(b"\n\n")
+        if not sep:
+            continue
+        match = re.search(br'filename\*?=(?:UTF-8\'\')?"?([^";\r\n]+)"?', header, re.I)
+        filename = match.group(1).decode("latin-1", "ignore").strip() if match else "upload"
+        ctype_match = re.search(br"Content-Type:\s*([^\r\n]+)", header, re.I)
+        ctype = ctype_match.group(1).decode("ascii", "ignore").strip() if ctype_match else ""
+        body = body.rstrip(b"\r\n")
+        if body.endswith(b"--"):
+            body = body[:-2].rstrip(b"\r\n")
+        if body:
+            return body, filename, ctype
+    return None
+
+
+def _filename_from_bytes(data: bytes, content_type: str, fallback: str) -> str:
+    header_name = fallback.strip()
+    if header_name:
+        return header_name
+    if data.startswith(b"%PDF"):
+        return "upload.pdf"
+    if data[:2] == b"PK":
+        return "upload.docx"
+    if (content_type or "").startswith("text/"):
+        return "upload.txt"
+    return "upload.bin"
+
+
 async def _load_resume_upload(request: Request, file: UploadFile | None) -> tuple[bytes, str, str]:
     if file is not None:
         data = await file.read()
@@ -296,12 +339,15 @@ async def _load_resume_upload(request: Request, file: UploadFile | None) -> tupl
                 return data, filename, getattr(value, "content_type", "") or ""
 
     data = await request.body()
+    extracted = _extract_multipart_file(data) if data else None
+    if extracted:
+        return extracted
     if data:
-        filename = request.headers.get("x-filename") or "resume.pdf"
-        if "wordprocessingml" in content_type or content_type.endswith("docx"):
-            filename = request.headers.get("x-filename") or "resume.docx"
-        elif content_type.startswith("text/"):
-            filename = request.headers.get("x-filename") or "resume.txt"
+        filename = _filename_from_bytes(
+            data,
+            content_type,
+            request.headers.get("x-filename") or "",
+        )
         return data, filename, content_type.split(";")[0].strip()
 
     raise HTTPException(
