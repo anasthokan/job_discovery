@@ -1,0 +1,25 @@
+Job Title: Senior Backend Engineer
+Company: Northwind Labs
+Location: San Francisco, CA
+Employment: Full-time, Remote
+
+About the role
+We are hiring a Senior Backend Engineer to build APIs and data pipelines for a high-traffic product.
+
+Responsibilities
+- Design and ship FastAPI services used by millions of users
+- Own PostgreSQL schema design and query performance
+- Deploy services on AWS with Docker and Kubernetes
+- Collaborate with frontend engineers on REST APIs
+
+Requirements
+- 5+ years of experience with Python, FastAPI, and SQL
+- Hands-on with PostgreSQL, AWS, Docker, and CI/CD
+- Experience with microservices and automated testing
+
+Preferred
+- Kubernetes, Terraform, and Kafka
+- Machine Learning or NLP exposure
+
+Tech stack
+Python, FastAPI, PostgreSQL, AWS, Docker, Kubernetes

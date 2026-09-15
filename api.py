@@ -5,11 +5,12 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.locations import DROPDOWN_STATES, is_usa_job, matches_city_filter, matches_state_filter
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 
@@ -21,8 +22,8 @@ SCRAPE_TIMEOUT = 300
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job scrape API plus resume/CV parse API for developers.",
-    version="1.1.0",
+    description="Job scrape API, resume/CV parse API, and job-description-to-CV API for developers.",
+    version="1.2.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -90,6 +91,65 @@ class ResumeParseResponse(BaseModel):
     certifications: list[str]
     languages: list[str]
     raw_text: str | None = None
+
+
+class ResumeInput(BaseModel):
+    profile: ResumeProfile | None = None
+    skills: list[str] = []
+    experience: list[ResumeExperience] = []
+    education: list[ResumeEducation] = []
+    projects: list[ResumeProject] = []
+    certifications: list[str] = []
+    languages: list[str] = []
+
+
+class CvFromJobRequest(BaseModel):
+    job_description: str = Field("", description="Full job posting text")
+    job_title: str | None = Field(None, description="Optional override if the posting title is known")
+    company: str | None = None
+    location: str | None = None
+    job_id: str | None = Field(None, description="Optional scraped job id from /api/jobs")
+    resume_text: str | None = Field(None, description="Optional raw resume text to tailor")
+    resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
+
+
+class JobParse(BaseModel):
+    title: str | None = None
+    company: str | None = None
+    location: str | None = None
+    employment_type: str | None = None
+    workplace_type: str | None = None
+    required_skills: list[str] = []
+    preferred_skills: list[str] = []
+    responsibilities: list[str] = []
+    qualifications: list[str] = []
+    keywords: list[str] = []
+
+
+class MatchReport(BaseModel):
+    score: int | None = None
+    matched_skills: list[str] = []
+    missing_skills: list[str] = []
+    extra_skills: list[str] = []
+
+
+class TailoredCv(BaseModel):
+    profile: ResumeProfile
+    skills: list[str]
+    experience: list[ResumeExperience]
+    education: list[ResumeEducation]
+    projects: list[ResumeProject]
+    certifications: list[str]
+    languages: list[str]
+
+
+class CvFromJobResponse(BaseModel):
+    ok: bool = True
+    mode: str
+    job: JobParse
+    match: MatchReport
+    cv: TailoredCv
+    cv_text: str | None = None
 
 
 def load_jobs() -> list[dict]:
@@ -240,6 +300,7 @@ def health():
         "ok": True,
         "service": "job-discovery",
         "resume_parse": True,
+        "cv_from_job": True,
         "resume_formats": ["pdf", "docx", "txt"],
     }
 
@@ -383,6 +444,149 @@ def parse_resume_from_text(
     except ResumeParseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return _resume_response(parsed, include_raw)
+
+
+def _job_from_cache(job_id: str | None) -> dict | None:
+    if not job_id:
+        return None
+    wanted = job_id.strip().lower()
+    for job in load_jobs():
+        if str(job.get("id") or "").lower() == wanted:
+            return job
+    raise HTTPException(status_code=404, detail=f"No scraped job found for id '{job_id}'.")
+
+
+def _build_cv_or_http(
+    *,
+    job_description: str = "",
+    job_title: str | None = None,
+    company: str | None = None,
+    location: str | None = None,
+    job_id: str | None = None,
+    resume_text: str | None = None,
+    resume: dict | None = None,
+    include_cv_text: bool = True,
+) -> dict:
+    cached = _job_from_cache(job_id)
+    extra_skills = None
+    if cached:
+        job_title = job_title or cached.get("title")
+        company = company or cached.get("company")
+        location = location or cached.get("location")
+        extra_skills = list(cached.get("skills") or []) or None
+        if not (job_description or "").strip() and extra_skills:
+            job_description = (
+                f"{cached.get('title') or 'Open role'}\n"
+                f"Company: {cached.get('company') or ''}\n"
+                f"Location: {cached.get('location') or ''}\n"
+                f"Required skills: {', '.join(extra_skills)}"
+            )
+    try:
+        return build_cv_from_job(
+            job_description,
+            job_title=job_title,
+            company=company,
+            location=location,
+            job_skills=extra_skills,
+            resume_text=resume_text,
+            resume=resume,
+            include_cv_text=include_cv_text,
+        )
+    except (JobToCvError, ResumeParseError) as exc:
+        status = getattr(exc, "status_code", 400)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@app.get("/api/cv")
+def cv_contract():
+    return {
+        "ok": True,
+        "service": "cv-from-job",
+        "modes": ["tailored", "template"],
+        "endpoints": {
+            "from_job": {
+                "method": "POST",
+                "path": "/api/cv/from-job",
+                "content_type": "application/json",
+                "body": {
+                    "job_description": "job posting text",
+                    "job_title": "optional",
+                    "company": "optional",
+                    "job_id": "optional scraped job id",
+                    "resume_text": "optional resume text",
+                    "resume": "optional parsed resume JSON",
+                },
+                "query": {"include_cv_text": "true"},
+            },
+            "from_job_file": {
+                "method": "POST",
+                "path": "/api/cv/from-job-file",
+                "content_type": "multipart/form-data",
+                "fields": {
+                    "file": "optional resume PDF/DOCX/TXT",
+                    "job_description": "job posting text",
+                    "job_title": "optional",
+                    "company": "optional",
+                    "job_id": "optional",
+                },
+                "query": {"include_cv_text": "true"},
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/cv/from-job",
+    response_model=CvFromJobResponse,
+    summary="Build or tailor a CV from a job description",
+)
+def cv_from_job(
+    body: CvFromJobRequest,
+    include_cv_text: bool = Query(True, description="Include formatted cv_text for display or download"),
+):
+    resume_payload = body.resume.model_dump() if body.resume else None
+    return _build_cv_or_http(
+        job_description=body.job_description,
+        job_title=body.job_title,
+        company=body.company,
+        location=body.location,
+        job_id=body.job_id,
+        resume_text=body.resume_text,
+        resume=resume_payload,
+        include_cv_text=include_cv_text,
+    )
+
+
+@app.post(
+    "/api/cv/from-job-file",
+    response_model=CvFromJobResponse,
+    summary="Upload a resume and tailor it to a job description",
+)
+async def cv_from_job_file(
+    file: UploadFile | None = File(None, description="Optional resume file: PDF, DOCX, or TXT"),
+    job_description: str = Form("", description="Full job posting text"),
+    job_title: str | None = Form(None),
+    company: str | None = Form(None),
+    location: str | None = Form(None),
+    job_id: str | None = Form(None),
+    include_cv_text: bool = Query(True, description="Include formatted cv_text for display or download"),
+):
+    resume_payload = None
+    if file is not None:
+        data = await file.read()
+        if data:
+            resume_payload = _parse_or_http(data, file.filename or "resume", file.content_type or "")
+
+    return _build_cv_or_http(
+        job_description=job_description,
+        job_title=job_title,
+        company=company,
+        location=location,
+        job_id=job_id,
+        resume=resume_payload,
+        include_cv_text=include_cv_text,
+    )
 
 
 if __name__ == "__main__":

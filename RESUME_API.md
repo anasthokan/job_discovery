@@ -8,6 +8,8 @@ Local example: `http://127.0.0.1:9001`
 
 Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/docs)
 
+Job-description-to-CV API: `CV_API.md` (`POST /api/cv/from-job`).
+
 Sample files in this repo: `samples/sample-resume.txt` and `samples/sample-resume.docx`.
 
 ## What it does
