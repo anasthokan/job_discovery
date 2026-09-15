@@ -260,6 +260,20 @@ def _strip_bullet(text: str) -> str:
     return re.sub(r"^[\-•●○▪◦\*]+\s*", "", (text or "").strip())
 
 
+def preview_text_from_docx(data: bytes) -> str:
+    from docx import Document
+
+    document = Document(io.BytesIO(data))
+    lines = []
+    for text, kind in _blocks_from_docx(document):
+        if kind == "blank":
+            if lines and lines[-1] != "":
+                lines.append("")
+            continue
+        lines.append(text)
+    return "\n".join(lines).strip()
+
+
 def _validate_upload(data: bytes, filename: str, expected: str) -> None:
     if not data:
         raise ConvertError("Empty file.")

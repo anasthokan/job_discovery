@@ -19,6 +19,11 @@ Upload a file and download the converted file:
 
 The response is the converted **file**, not JSON. Conversion is text-based. Images, columns, headers/footers, and exact page layout are not preserved.
 
+**Postman:** a `.docx` response looks like red/black XML in the Body tab. That is the Word file. Do not read that tab.
+
+- File download: **Send** button dropdown → **Send and Download** → save `Anas_Resume.docx` → open in Word
+- Readable preview: add query `preview=true`, then open the **Preview** tab
+
 Files are converted in memory. Nothing is saved on disk.
 
 ## Endpoints

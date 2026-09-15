@@ -1,3 +1,4 @@
+import html
 import json
 import re
 import subprocess
@@ -9,10 +10,17 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
-from jobscraper.document_convert import ConvertError, DOCX_TYPE, PDF_TYPE, docx_to_pdf, pdf_to_docx
+from jobscraper.document_convert import (
+    ConvertError,
+    DOCX_TYPE,
+    PDF_TYPE,
+    docx_to_pdf,
+    pdf_to_docx,
+    preview_text_from_docx,
+)
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.locations import DROPDOWN_STATES, is_usa_job, matches_city_filter, matches_state_filter
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
@@ -276,6 +284,26 @@ def _file_download(content: bytes, filename: str, media_type: str) -> Response:
             "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded}",
         },
     )
+
+
+def _html_preview(title: str, text: str) -> HTMLResponse:
+    body = html.escape(text or "").replace("\n", "<br>\n")
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: Calibri, Arial, sans-serif; max-width: 760px; margin: 24px auto; color: #0f172a; line-height: 1.5; }}
+    h1 {{ font-size: 1rem; color: #64748b; font-weight: 600; }}
+  </style>
+</head>
+<body>
+  <h1>{html.escape(title)}</h1>
+  <div>{body}</div>
+</body>
+</html>"""
+    return HTMLResponse(page)
 
 
 def _extract_multipart_file(data: bytes) -> tuple[bytes, str, str] | None:
@@ -636,7 +664,8 @@ def convert_contract():
             "docx_to_pdf": ["docx"],
         },
         "notes": [
-            "Returns a file download, not JSON.",
+            "Default response is a file download, not JSON.",
+            "In Postman, PDF→DOCX looks like XML in the Body tab. Use Send and Download, or add ?preview=true.",
             "Text-based conversion. Images, columns, and exact layout are not preserved.",
             "Image-only / scanned PDFs fail because there is no OCR.",
             "Old .doc is not supported.",
@@ -647,6 +676,7 @@ def convert_contract():
                 "path": "/api/convert/pdf-to-docx",
                 "content_type": "multipart/form-data",
                 "field": "file",
+                "query": {"preview": "false"},
                 "returns": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             },
             "docx_to_pdf": {
@@ -654,6 +684,7 @@ def convert_contract():
                 "path": "/api/convert/docx-to-pdf",
                 "content_type": "multipart/form-data",
                 "field": "file",
+                "query": {"preview": "false"},
                 "returns": "application/pdf",
             },
         },
@@ -669,6 +700,7 @@ def convert_contract():
 async def convert_pdf_to_docx(
     request: Request,
     file: UploadFile | None = File(None, description="PDF file to convert"),
+    preview: bool = Query(False, description="Return HTML text preview instead of a .docx file"),
 ):
     data, filename, _content_type = await _load_resume_upload(request, file)
     try:
@@ -677,7 +709,10 @@ async def convert_pdf_to_docx(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF to DOCX failed: {exc}") from exc
-    return _file_download(converted, _swap_extension(filename, ".docx"), DOCX_TYPE)
+    out_name = _swap_extension(filename, ".docx")
+    if preview:
+        return _html_preview(out_name, preview_text_from_docx(converted))
+    return _file_download(converted, out_name, DOCX_TYPE)
 
 
 @app.post(
@@ -688,6 +723,7 @@ async def convert_pdf_to_docx(
 async def convert_docx_to_pdf(
     request: Request,
     file: UploadFile | None = File(None, description="Word .docx file to convert"),
+    preview: bool = Query(False, description="Return HTML text preview instead of a .pdf file"),
 ):
     data, filename, _content_type = await _load_resume_upload(request, file)
     try:
@@ -696,7 +732,10 @@ async def convert_docx_to_pdf(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DOCX to PDF failed: {exc}") from exc
-    return _file_download(converted, _swap_extension(filename, ".pdf"), PDF_TYPE)
+    out_name = _swap_extension(filename, ".pdf")
+    if preview:
+        return _html_preview(out_name, preview_text_from_docx(data))
+    return _file_download(converted, out_name, PDF_TYPE)
 
 
 @app.post(
