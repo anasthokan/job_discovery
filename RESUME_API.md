@@ -10,6 +10,8 @@ Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/
 
 Job-description-to-CV API: `CV_API.md` (`POST /api/cv/from-job`).
 
+PDF ↔ DOCX convert API: `CONVERT_API.md`.
+
 Sample files in this repo: `samples/sample-resume.txt` and `samples/sample-resume.docx`.
 
 ## What it does

@@ -1,15 +1,18 @@
 import json
+import re
 import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
+from jobscraper.document_convert import ConvertError, DOCX_TYPE, PDF_TYPE, docx_to_pdf, pdf_to_docx
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.locations import DROPDOWN_STATES, is_usa_job, matches_city_filter, matches_state_filter
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
@@ -22,8 +25,8 @@ SCRAPE_TIMEOUT = 300
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job scrape API, resume/CV parse API, and job-description-to-CV API for developers.",
-    version="1.2.0",
+    description="Job scrape API, resume/CV parse API, job-description-to-CV API, and PDF/DOCX conversion API for developers.",
+    version="1.3.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -258,6 +261,23 @@ def _parse_or_http(data: bytes, filename: str, content_type: str) -> dict:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+def _swap_extension(filename: str, extension: str) -> str:
+    stem = Path(filename or "converted").stem.strip() or "converted"
+    stem = re.sub(r"[^\w.\-]+", "_", stem).strip("._") or "converted"
+    return f"{stem}{extension}"
+
+
+def _file_download(content: bytes, filename: str, media_type: str) -> Response:
+    encoded = quote(filename)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded}",
+        },
+    )
+
+
 async def _load_resume_upload(request: Request, file: UploadFile | None) -> tuple[bytes, str, str]:
     if file is not None:
         data = await file.read()
@@ -301,6 +321,7 @@ def health():
         "service": "job-discovery",
         "resume_parse": True,
         "cv_from_job": True,
+        "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
     }
 
@@ -556,6 +577,76 @@ def cv_from_job(
         resume=resume_payload,
         include_cv_text=include_cv_text,
     )
+
+
+@app.get("/api/convert")
+def convert_contract():
+    return {
+        "ok": True,
+        "service": "pdf-docx-convert",
+        "max_upload_bytes": 8 * 1024 * 1024,
+        "formats": {
+            "pdf_to_docx": ["pdf"],
+            "docx_to_pdf": ["docx"],
+        },
+        "notes": [
+            "Returns a file download, not JSON.",
+            "Text-based conversion. Images, columns, and exact layout are not preserved.",
+            "Image-only / scanned PDFs fail because there is no OCR.",
+            "Old .doc is not supported.",
+        ],
+        "endpoints": {
+            "pdf_to_docx": {
+                "method": "POST",
+                "path": "/api/convert/pdf-to-docx",
+                "content_type": "multipart/form-data",
+                "field": "file",
+                "returns": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            },
+            "docx_to_pdf": {
+                "method": "POST",
+                "path": "/api/convert/docx-to-pdf",
+                "content_type": "multipart/form-data",
+                "field": "file",
+                "returns": "application/pdf",
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/convert/pdf-to-docx",
+    summary="Convert a PDF file to DOCX",
+    response_class=Response,
+)
+async def convert_pdf_to_docx(
+    request: Request,
+    file: UploadFile | None = File(None, description="PDF file to convert"),
+):
+    data, filename, _content_type = await _load_resume_upload(request, file)
+    try:
+        converted = pdf_to_docx(data, filename)
+    except ConvertError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _file_download(converted, _swap_extension(filename, ".docx"), DOCX_TYPE)
+
+
+@app.post(
+    "/api/convert/docx-to-pdf",
+    summary="Convert a DOCX file to PDF",
+    response_class=Response,
+)
+async def convert_docx_to_pdf(
+    request: Request,
+    file: UploadFile | None = File(None, description="Word .docx file to convert"),
+):
+    data, filename, _content_type = await _load_resume_upload(request, file)
+    try:
+        converted = docx_to_pdf(data, filename)
+    except ConvertError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return _file_download(converted, _swap_extension(filename, ".pdf"), PDF_TYPE)
 
 
 @app.post(
