@@ -5,7 +5,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -198,6 +198,42 @@ def _parse_or_http(data: bytes, filename: str, content_type: str) -> dict:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
+async def _load_resume_upload(request: Request, file: UploadFile | None) -> tuple[bytes, str, str]:
+    if file is not None:
+        data = await file.read()
+        if data:
+            return data, file.filename or "resume", file.content_type or ""
+
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        for value in form.values():
+            filename = getattr(value, "filename", None)
+            if not filename:
+                continue
+            data = await value.read()
+            if data:
+                return data, filename, getattr(value, "content_type", "") or ""
+
+    data = await request.body()
+    if data:
+        filename = request.headers.get("x-filename") or "resume.pdf"
+        if "wordprocessingml" in content_type or content_type.endswith("docx"):
+            filename = request.headers.get("x-filename") or "resume.docx"
+        elif content_type.startswith("text/"):
+            filename = request.headers.get("x-filename") or "resume.txt"
+        return data, filename, content_type.split(";")[0].strip()
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "No file received. In Postman use Body → form-data, key=file, type=File, "
+            "and uncheck Headers → Content-Type. Or use Body → binary with "
+            "Content-Type application/pdf."
+        ),
+    )
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -310,11 +346,12 @@ def resume_contract():
     summary="Parse a resume / CV file",
 )
 async def parse_resume_file(
-    file: UploadFile = File(..., description="Resume file: PDF, DOCX, or TXT"),
+    request: Request,
+    file: UploadFile | None = File(None, description="Resume file: PDF, DOCX, or TXT"),
     include_raw: bool = Query(False, description="Include extracted raw_text in the response"),
 ):
-    data = await file.read()
-    parsed = _parse_or_http(data, file.filename or "", file.content_type or "")
+    data, filename, content_type = await _load_resume_upload(request, file)
+    parsed = _parse_or_http(data, filename, content_type)
     return _resume_response(parsed, include_raw)
 
 
@@ -325,10 +362,11 @@ async def parse_resume_file(
     include_in_schema=False,
 )
 async def scrape_resume_file(
-    file: UploadFile = File(..., description="Resume file: PDF, DOCX, or TXT"),
+    request: Request,
+    file: UploadFile | None = File(None, description="Resume file: PDF, DOCX, or TXT"),
     include_raw: bool = Query(False),
 ):
-    return await parse_resume_file(file, include_raw)
+    return await parse_resume_file(request, file, include_raw)
 
 
 @app.post(

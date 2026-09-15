@@ -87,6 +87,16 @@ try {
   Write-Host "Could not toggle ARR proxy automatically. In IIS: server node -> Application Request Routing Cache -> Server Proxy Settings -> Enable proxy." -ForegroundColor Yellow
 }
 
+try {
+  Set-WebConfigurationProperty -pspath "MACHINE/WEBROOT/APPHOST/$SiteName" -filter "system.webServer/serverRuntime" -name "uploadReadAheadSize" -value 10485760
+} catch {
+  try {
+    Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter "system.webServer/serverRuntime" -name "uploadReadAheadSize" -value 10485760
+  } catch {
+    Write-Host "Could not set uploadReadAheadSize. File uploads through IIS may fail until this is 10485760." -ForegroundColor Yellow
+  }
+}
+
 Write-Host "==> PM2 uvicorn on 127.0.0.1:$AppPort..." -ForegroundColor Cyan
 $pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
 if (-not $pm2) {
