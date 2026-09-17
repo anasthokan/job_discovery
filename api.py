@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
+from jobscraper.ats_score import AtsScoreError, score_resume
 from jobscraper.document_convert import (
     ConvertError,
     DOCX_TYPE,
@@ -40,8 +41,8 @@ SCRAPE_TIMEOUT = 300
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job listings API, skill-based job recommendations, resume/CV parse, job-description-to-CV, and PDF/DOCX conversion.",
-    version="1.4.0",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, ATS resume score, job-description-to-CV, and PDF/DOCX conversion.",
+    version="1.5.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -180,6 +181,63 @@ class RecommendRequest(BaseModel):
     city: str = ""
     limit: int = Field(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT)
     refresh: bool = Field(False, description="If true, scrape boards with these skills before ranking")
+
+
+class AtsScoreRequest(BaseModel):
+    resume_text: str | None = Field(None, description="Raw resume / CV text")
+    resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
+    job_description: str = Field("", description="Optional job posting text to score keyword match")
+    job_title: str | None = None
+    company: str | None = None
+    location: str | None = None
+    job_id: str | None = Field(None, description="Optional scraped job id from /api/jobs")
+
+
+class AtsCheck(BaseModel):
+    id: str
+    ok: bool
+    message: str
+
+
+class AtsBreakdown(BaseModel):
+    parseability: int
+    contact: int
+    structure: int
+    content: int
+    job_match: int | None = None
+
+
+class AtsMatch(BaseModel):
+    score: int | None = None
+    matched_skills: list[str] = []
+    missing_skills: list[str] = []
+    extra_skills: list[str] = []
+    job_title: str | None = None
+    company: str | None = None
+
+
+class AtsProfile(BaseModel):
+    full_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    linkedin: str | None = None
+    github: str | None = None
+
+
+class AtsScoreResponse(BaseModel):
+    ok: bool = True
+    score: int
+    grade: str
+    label: str
+    breakdown: AtsBreakdown
+    checks: list[AtsCheck]
+    suggestions: list[str]
+    match: AtsMatch | None = None
+    job: JobParse | None = None
+    skills: list[str] = []
+    profile: AtsProfile
+    source: ResumeSource
 
 
 def load_jobs() -> list[dict]:
@@ -494,6 +552,7 @@ def health():
         "jobs_list": True,
         "jobs_recommend": True,
         "resume_parse": True,
+        "ats_score": True,
         "cv_from_job": True,
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
@@ -778,6 +837,125 @@ def _job_from_cache(job_id: str | None) -> dict | None:
         if str(job.get("id") or "").lower() == wanted:
             return job
     raise HTTPException(status_code=404, detail=f"No scraped job found for id '{job_id}'.")
+
+
+def _ats_or_http(
+    *,
+    resume_text: str | None = None,
+    resume: dict | None = None,
+    job_description: str = "",
+    job_title: str | None = None,
+    company: str | None = None,
+    location: str | None = None,
+    job_id: str | None = None,
+) -> dict:
+    cached = _job_from_cache(job_id)
+    extra_skills = None
+    if cached:
+        job_title = job_title or cached.get("title")
+        company = company or cached.get("company")
+        location = location or cached.get("location")
+        extra_skills = list(cached.get("skills") or []) or None
+        if not (job_description or "").strip() and extra_skills:
+            job_description = (
+                f"{cached.get('title') or 'Open role'}\n"
+                f"Company: {cached.get('company') or ''}\n"
+                f"Location: {cached.get('location') or ''}\n"
+                f"Required skills: {', '.join(extra_skills)}"
+            )
+    try:
+        return score_resume(
+            resume_text=resume_text,
+            resume=resume,
+            job_description=job_description,
+            job_title=job_title,
+            company=company,
+            location=location,
+            job_skills=extra_skills,
+        )
+    except (AtsScoreError, JobToCvError, ResumeParseError) as exc:
+        status = getattr(exc, "status_code", 400)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@app.get("/api/ats")
+def ats_contract():
+    return {
+        "ok": True,
+        "service": "ats-score",
+        "max_upload_bytes": 8 * 1024 * 1024,
+        "formats": ["pdf", "docx", "txt"],
+        "score": "0-100",
+        "grades": ["A", "B", "C", "D", "F"],
+        "endpoints": {
+            "score": {
+                "method": "POST",
+                "path": "/api/ats/score",
+                "content_type": "application/json",
+                "body": {
+                    "resume_text": "resume text",
+                    "resume": "optional parsed resume JSON",
+                    "job_description": "optional job posting text",
+                    "job_id": "optional scraped job id",
+                },
+            },
+            "score_file": {
+                "method": "POST",
+                "path": "/api/ats/score-file",
+                "content_type": "multipart/form-data",
+                "fields": {
+                    "file": "resume PDF/DOCX/TXT",
+                    "job_description": "optional job posting text",
+                    "job_id": "optional scraped job id",
+                },
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/ats/score",
+    response_model=AtsScoreResponse,
+    summary="Get an ATS score from resume text or parsed JSON",
+)
+def ats_score_from_json(body: AtsScoreRequest):
+    resume_payload = body.resume.model_dump() if body.resume else None
+    return _ats_or_http(
+        resume_text=body.resume_text,
+        resume=resume_payload,
+        job_description=body.job_description,
+        job_title=body.job_title,
+        company=body.company,
+        location=body.location,
+        job_id=body.job_id,
+    )
+
+
+@app.post(
+    "/api/ats/score-file",
+    response_model=AtsScoreResponse,
+    summary="Upload a resume and get an ATS score",
+)
+async def ats_score_from_file(
+    request: Request,
+    file: UploadFile | None = File(None, description="Resume file: PDF, DOCX, or TXT"),
+    job_description: str = Form("", description="Optional job posting text"),
+    job_title: str | None = Form(None),
+    company: str | None = Form(None),
+    location: str | None = Form(None),
+    job_id: str | None = Form(None),
+):
+    data, filename, content_type = await _load_resume_upload(request, file)
+    parsed = _parse_or_http(data, filename, content_type)
+    return _ats_or_http(
+        resume=parsed,
+        job_description=job_description,
+        job_title=job_title,
+        company=company,
+        location=location,
+        job_id=job_id,
+    )
 
 
 def _build_cv_or_http(

@@ -10,6 +10,8 @@ Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/
 
 Job listings + skill recommend API: `JOBS_API.md`.
 
+ATS resume score API: `ATS_API.md` (`POST /api/ats/score-file`).
+
 Job-description-to-CV API: `CV_API.md` (`POST /api/cv/from-job`).
 
 PDF ↔ DOCX convert API: `CONVERT_API.md`.
