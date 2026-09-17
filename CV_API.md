@@ -10,6 +10,8 @@ Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/
 
 Related parse API: `RESUME_API.md`
 
+Job listings + skill recommend API: `JOBS_API.md`.
+
 PDF ↔ DOCX convert API: `CONVERT_API.md`.
 
 Sample files in this repo: `samples/sample-job-description.txt` and `samples/sample-resume.txt`.

@@ -23,6 +23,13 @@ from jobscraper.document_convert import (
 )
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
 from jobscraper.locations import DROPDOWN_STATES, is_usa_job, matches_city_filter, matches_state_filter
+from jobscraper.recommend import (
+    DEFAULT_LIMIT,
+    MAX_LIMIT,
+    normalize_skills,
+    parse_skill_query,
+    recommend_jobs,
+)
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 
 ROOT = Path(__file__).resolve().parent
@@ -33,8 +40,8 @@ SCRAPE_TIMEOUT = 300
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job scrape API, resume/CV parse API, job-description-to-CV API, and PDF/DOCX conversion API for developers.",
-    version="1.3.0",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, job-description-to-CV, and PDF/DOCX conversion.",
+    version="1.4.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -163,6 +170,18 @@ class CvFromJobResponse(BaseModel):
     cv_text: str | None = None
 
 
+class RecommendRequest(BaseModel):
+    skills: list[str] = Field(default_factory=list, description="Candidate skills, e.g. Python, FastAPI, AWS")
+    resume_text: str | None = Field(None, description="Optional raw resume text; skills are extracted from it")
+    resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
+    state: str = Field("All", description="US state filter, Remote, or All")
+    platform: str = Field("All", description="Job board name, or All")
+    days: int = Field(30, description="Only listings posted within this many days")
+    city: str = ""
+    limit: int = Field(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT)
+    refresh: bool = Field(False, description="If true, scrape boards with these skills before ranking")
+
+
 def load_jobs() -> list[dict]:
     if not DATA_FILE.exists():
         return []
@@ -196,9 +215,12 @@ def filter_jobs(
     platform: str,
     days: int,
     city: str = "",
+    usa_only: bool = True,
 ) -> list[dict]:
     filtered = []
     for job in jobs:
+        if usa_only and not is_usa_job(job.get("state") or "", job.get("location") or ""):
+            continue
         if platform != "All" and job.get("platform") != platform:
             continue
         if int(job.get("daysAgo") or 0) > days:
@@ -220,6 +242,82 @@ def filter_jobs(
         filtered.append(job)
     filtered.sort(key=lambda row: (row.get("daysAgo") or 0, row.get("title") or ""))
     return filtered
+
+
+def _page(jobs: list[dict], limit: int | None, offset: int) -> list[dict]:
+    start = max(offset, 0)
+    if limit is None:
+        return jobs[start:]
+    return jobs[start : start + max(limit, 0)]
+
+
+def _empty_cache_hint() -> str:
+    return (
+        "No listings in cache. POST /api/scrape?keywords=python,fastapi first, "
+        "or call /api/recommend with refresh=true."
+    )
+
+
+def _skills_from_inputs(
+    skills: list[str] | None = None,
+    resume_text: str | None = None,
+    resume: dict | None = None,
+) -> list[str]:
+    found = normalize_skills(skills)
+    if found:
+        return found
+    if resume:
+        found = normalize_skills(resume.get("skills") or [])
+        if found:
+            return found
+    if resume_text and resume_text.strip():
+        try:
+            parsed = parse_resume_text(resume_text)
+        except ResumeParseError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        found = normalize_skills(parsed.get("skills") or [])
+    if not found:
+        raise HTTPException(
+            status_code=400,
+            detail="Send at least one skill, or a resume / resume_text that contains a skills section.",
+        )
+    return found
+
+
+def _recommend_payload(
+    *,
+    skills: list[str],
+    state: str,
+    platform: str,
+    days: int,
+    city: str,
+    limit: int,
+    refresh: bool,
+) -> dict:
+    if refresh:
+        if not SCRAPE_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
+        try:
+            run_spider(",".join(skills), state, platform, city)
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
+        finally:
+            SCRAPE_LOCK.release()
+    filtered = filter_jobs(load_jobs(), [], state, platform, days, city)
+    ranked = recommend_jobs(filtered, skills, limit=limit)
+    hint = None
+    if not filtered:
+        hint = _empty_cache_hint()
+    elif not ranked:
+        hint = "Listings were found, but none overlapped these skills. Try refresh=true or broader skills."
+    return {
+        "ok": True,
+        "count": len(ranked),
+        "skills": skills,
+        "jobs": ranked,
+        "hint": hint,
+        **cache_meta(),
+    }
 
 
 def run_spider(keywords: str, location: str, platform: str, city: str = "") -> None:
@@ -393,6 +491,8 @@ def health():
     return {
         "ok": True,
         "service": "job-discovery",
+        "jobs_list": True,
+        "jobs_recommend": True,
         "resume_parse": True,
         "cv_from_job": True,
         "pdf_docx_convert": True,
@@ -435,14 +535,24 @@ def filters():
 
 @app.get("/api/jobs")
 def get_jobs(
-    keywords: str = Query(""),
+    keywords: str = Query("", description="Comma-separated title/company/skill keywords"),
     state: str = Query("All"),
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
+    limit: int | None = Query(None, ge=1, le=200, description="Optional page size. Omit to return all matches."),
+    offset: int = Query(0, ge=0),
 ):
-    jobs = filter_jobs(load_jobs(), [], state, platform, days, city)
-    return {"jobs": jobs, "count": len(jobs), **cache_meta()}
+    jobs = filter_jobs(load_jobs(), parse_keywords(keywords), state, platform, days, city)
+    page = _page(jobs, limit, offset)
+    return {
+        "jobs": page,
+        "count": len(page),
+        "total": len(jobs),
+        "limit": limit,
+        "offset": offset,
+        **cache_meta(),
+    }
 
 
 @app.post("/api/scrape")
@@ -467,6 +577,125 @@ def scrape_jobs(
         if is_usa_job(job.get("state") or "", job.get("location") or "")
     ]
     return {"jobs": jobs, "count": len(jobs), **cache_meta()}
+
+
+@app.get("/api/recommend")
+def recommend_contract():
+    return {
+        "ok": True,
+        "service": "jobs-recommend",
+        "endpoints": {
+            "listings": {
+                "method": "GET",
+                "path": "/api/jobs",
+                "query": {
+                    "keywords": "python,fastapi",
+                    "state": "All",
+                    "platform": "All",
+                    "days": 30,
+                    "city": "",
+                    "limit": 50,
+                    "offset": 0,
+                },
+            },
+            "scrape": {
+                "method": "POST",
+                "path": "/api/scrape",
+                "query": {
+                    "keywords": "python,fastapi",
+                    "state": "All",
+                    "platform": "All",
+                    "days": 30,
+                    "city": "",
+                },
+            },
+            "recommend": {
+                "method": "POST",
+                "path": "/api/recommend",
+                "content_type": "application/json",
+                "body": {
+                    "skills": ["Python", "FastAPI", "AWS"],
+                    "resume_text": "optional raw resume text",
+                    "resume": "optional parsed resume JSON",
+                    "state": "All",
+                    "platform": "All",
+                    "days": 30,
+                    "limit": 25,
+                    "refresh": False,
+                },
+            },
+            "recommend_file": {
+                "method": "POST",
+                "path": "/api/recommend/file",
+                "content_type": "multipart/form-data",
+                "fields": {
+                    "file": "optional resume PDF/DOCX/TXT",
+                    "skills": "optional comma-separated skills",
+                    "state": "All",
+                    "platform": "All",
+                    "days": 30,
+                    "limit": 25,
+                    "refresh": False,
+                },
+            },
+        },
+        "docs": "/docs",
+    }
+
+
+@app.post(
+    "/api/recommend",
+    summary="Recommend job listings from skills or a resume",
+)
+def recommend_from_json(body: RecommendRequest):
+    resume_payload = body.resume.model_dump() if body.resume else None
+    skills = _skills_from_inputs(body.skills, body.resume_text, resume_payload)
+    return _recommend_payload(
+        skills=skills,
+        state=body.state,
+        platform=body.platform,
+        days=body.days,
+        city=body.city,
+        limit=body.limit,
+        refresh=body.refresh,
+    )
+
+
+@app.post(
+    "/api/recommend/file",
+    summary="Upload a resume and recommend matching job listings",
+)
+async def recommend_from_file(
+    file: UploadFile | None = File(None, description="Optional resume file: PDF, DOCX, or TXT"),
+    skills: str = Form("", description="Optional comma-separated skills"),
+    state: str = Form("All"),
+    platform: str = Form("All"),
+    days: int = Form(30),
+    city: str = Form(""),
+    limit: int = Form(DEFAULT_LIMIT),
+    refresh: bool = Form(False),
+):
+    listed = parse_skill_query(skills)
+    resume_payload = None
+    if file is not None:
+        data = await file.read()
+        if data:
+            resume_payload = _parse_or_http(data, file.filename or "resume", file.content_type or "")
+    if not listed and resume_payload is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Upload a resume file or send skills as comma-separated text.",
+        )
+    found = _skills_from_inputs(listed, None, resume_payload)
+    return _recommend_payload(
+        skills=found,
+        state=state,
+        platform=platform,
+        days=days,
+        city=city,
+        limit=limit,
+        refresh=refresh,
+    )
 
 
 @app.get("/api/resume")

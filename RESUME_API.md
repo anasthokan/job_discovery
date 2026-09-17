@@ -8,6 +8,8 @@ Local example: `http://127.0.0.1:9001`
 
 Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/docs)
 
+Job listings + skill recommend API: `JOBS_API.md`.
+
 Job-description-to-CV API: `CV_API.md` (`POST /api/cv/from-job`).
 
 PDF ↔ DOCX convert API: `CONVERT_API.md`.
