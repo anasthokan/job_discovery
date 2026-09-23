@@ -1,13 +1,21 @@
 import html
 import json
+import logging
+import os
 import re
 import subprocess
 import sys
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
+from urllib.request import Request as UrlRequest, urlopen
+from zoneinfo import ZoneInfo
 
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -32,21 +40,141 @@ from jobscraper.recommend import (
     recommend_jobs,
 )
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
+from jobscraper.db import (
+    close_conn as close_mysql,
+    finish_scrape_run,
+    health as mysql_health,
+    import_json_if_empty,
+    init_db as init_mysql,
+    job_count as mysql_job_count,
+    last_scrape_meta,
+    load_jobs as load_jobs_mysql,
+    mysql_configured,
+    start_scrape_run,
+    upsert_jobs,
+)
 
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
 DATA_FILE = ROOT / "data" / "jobs.json"
 INDEX_FILE = ROOT / "index.html"
+DASHBOARD_FILE = ROOT / "dashboard.html"
 SCRAPE_LOCK = threading.Lock()
 SCRAPE_TIMEOUT = 300
+log = logging.getLogger("job-discovery")
+USAJOBS_CACHE_TTL = 3600
+USAJOBS_CODELISTS = {
+    "agencies": {
+        "url": "https://data.usajobs.gov/api/codelist/agencysubelements",
+        "kind": "agency",
+        "search_param": "a",
+    },
+    "series": {
+        "url": "https://data.usajobs.gov/api/codelist/occupationalseries",
+        "kind": "series",
+        "search_param": "j",
+    },
+}
+USAJOBS_AGENCIES_URL = USAJOBS_CODELISTS["agencies"]["url"]
+_USAJOBS_LOCK = threading.Lock()
+_USAJOBS_CACHE: dict[str, dict] = {}
+_SCHEDULER: BackgroundScheduler | None = None
+
+
+def _env(name: str, default: str = "") -> str:
+    return (os.getenv(name) or default).strip()
+
+
+def _truthy(name: str, default: str = "true") -> bool:
+    return _env(name, default).lower() not in {"0", "false", "no", "off"}
+
+
+def _schedule_hours() -> list[int]:
+    hours = []
+    for part in (_env("SCRAPE_HOURS", "8,20") or "8,20").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            hour = int(part)
+        except ValueError:
+            continue
+        if 0 <= hour <= 23:
+            hours.append(hour)
+    return hours or [8, 20]
+
+
+def scheduled_scrape() -> None:
+    if not SCRAPE_LOCK.acquire(blocking=False):
+        log.warning("Scheduled scrape skipped: another scrape is running")
+        return
+    try:
+        keywords = _env("SCRAPE_KEYWORDS", "python,javascript,react,java,aws")
+        state = _env("SCRAPE_STATE", "All") or "All"
+        platform = _env("SCRAPE_PLATFORM", "All") or "All"
+        city = _env("SCRAPE_CITY", "")
+        log.info("Scheduled scrape starting keywords=%s", keywords)
+        run_spider(keywords, state, platform, city)
+        log.info("Scheduled scrape finished")
+    except Exception:
+        log.exception("Scheduled scrape failed")
+    finally:
+        SCRAPE_LOCK.release()
+
+
+def _start_scheduler() -> BackgroundScheduler | None:
+    if not _truthy("SCRAPE_SCHEDULE_ENABLED", "true"):
+        log.info("Scrape schedule disabled")
+        return None
+    tz_name = _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        log.warning("Invalid SCRAPE_TZ=%s, using UTC", tz_name)
+        tz_name = "UTC"
+        tz = ZoneInfo("UTC")
+    hours = _schedule_hours()
+    scheduler = BackgroundScheduler(timezone=tz)
+    for hour in hours:
+        scheduler.add_job(
+            scheduled_scrape,
+            "cron",
+            hour=hour,
+            minute=0,
+            id=f"scrape-{hour}",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+    scheduler.start()
+    log.info("Scrape schedule: %s:00 %s", hours, tz_name)
+    return scheduler
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    global _SCHEDULER
+    init_mysql()
+    import_json_if_empty(DATA_FILE)
+    _SCHEDULER = _start_scheduler()
+    yield
+    if _SCHEDULER is not None:
+        _SCHEDULER.shutdown(wait=False)
+        _SCHEDULER = None
+    close_mysql()
+
 
 app = FastAPI(
     title="Job Discovery",
-    description="Job listings API, skill-based job recommendations, resume/CV parse, ATS resume score, job-description-to-CV, and PDF/DOCX conversion.",
-    version="1.5.0",
+    description="Job listings API, skill-based job recommendations, resume/CV parse, ATS resume score, job-description-to-CV, PDF/DOCX conversion, and MySQL job storage.",
+    version="1.6.0",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "null"],
+    allow_origin_regex=".*",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -230,6 +358,9 @@ class AtsScoreResponse(BaseModel):
     score: int
     grade: str
     label: str
+    job_title: str | None = None
+    matched_keywords: list[str] = []
+    suggested_additions: list[str] = []
     breakdown: AtsBreakdown
     checks: list[AtsCheck]
     suggestions: list[str]
@@ -240,7 +371,7 @@ class AtsScoreResponse(BaseModel):
     source: ResumeSource
 
 
-def load_jobs() -> list[dict]:
+def load_jobs_json() -> list[dict]:
     if not DATA_FILE.exists():
         return []
     try:
@@ -253,7 +384,19 @@ def load_jobs() -> list[dict]:
     return payload if isinstance(payload, list) else []
 
 
+def load_jobs() -> list[dict]:
+    if mysql_configured():
+        rows = load_jobs_mysql()
+        if rows:
+            return rows
+    return load_jobs_json()
+
+
 def cache_meta() -> dict:
+    if mysql_configured():
+        meta = last_scrape_meta()
+        if meta.get("scraped_at"):
+            return {"scraped_at": meta["scraped_at"], "age_seconds": meta["age_seconds"]}
     if not DATA_FILE.exists():
         return {"scraped_at": None, "age_seconds": None}
     mtime = DATA_FILE.stat().st_mtime
@@ -264,6 +407,140 @@ def cache_meta() -> dict:
 
 def parse_keywords(raw: str) -> list[str]:
     return [part.strip().lower() for part in (raw or "").split(",") if part.strip()]
+
+
+def _days_ago_from_iso(value: str | None) -> int:
+    if not value:
+        return 0
+    cleaned = str(value).strip().replace("Z", "+00:00")
+    try:
+        posted = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return 0
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - posted).total_seconds() // 86400))
+
+
+def _codelist_to_job(row: dict, *, kind: str, search_param: str) -> dict:
+    code = str(row.get("Code") or "").strip()
+    name = str(row.get("Value") or "").strip() or f"Unknown {kind}"
+    parent = str(row.get("ParentCode") or "").strip()
+    acronym = str(row.get("Acronym") or "").strip()
+    family = str(row.get("JobFamily") or "").strip()
+    modified = str(row.get("LastModified") or "").strip()
+    company = acronym or parent or (f"Series {code}" if kind == "series" and code else "USAJobs")
+    skills = [item for item in [code, parent, acronym, family] if item]
+    query = f"{search_param}={quote(code)}" if code else ""
+    return {
+        "id": f"usajobs-{kind}-{code}",
+        "title": name,
+        "company": company,
+        "skills": skills,
+        "state": "United States",
+        "location": "United States",
+        "platform": "USAJobs",
+        "list_type": kind,
+        "daysAgo": _days_ago_from_iso(modified),
+        "url": f"https://www.usajobs.gov/Search/Results?{query}" if query else "https://www.usajobs.gov/",
+        "posted_at": modified or None,
+        "agency_code": code if kind == "agency" else None,
+        "parent_code": parent or None,
+        "series_code": code if kind == "series" else None,
+        "job_family": family or None,
+    }
+
+
+def _fetch_usajobs_json(url: str) -> dict:
+    req = UrlRequest(
+        url,
+        headers={
+            "User-Agent": "JobDiscovery/1.5 (dashboard test bind)",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"USAJobs returned HTTP {exc.code}.") from exc
+    except URLError as exc:
+        raise HTTPException(status_code=502, detail=f"USAJobs request failed: {exc.reason}.") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail="USAJobs returned invalid JSON.") from exc
+
+
+def fetch_usajobs_codelist(name: str, *, refresh: bool = False) -> list[dict]:
+    spec = USAJOBS_CODELISTS.get(name)
+    if not spec:
+        raise HTTPException(status_code=404, detail=f"Unknown USAJobs list '{name}'.")
+    now = datetime.now(timezone.utc).timestamp()
+    with _USAJOBS_LOCK:
+        cached = _USAJOBS_CACHE.get(name) or {"fetched_at": 0.0, "jobs": []}
+        age = now - float(cached.get("fetched_at") or 0)
+        if cached.get("jobs") and not refresh and age < USAJOBS_CACHE_TTL:
+            return cached["jobs"]
+    payload = _fetch_usajobs_json(spec["url"])
+    values = []
+    for block in payload.get("CodeList") or []:
+        if isinstance(block, dict):
+            values.extend(block.get("ValidValue") or [])
+    jobs = [
+        _codelist_to_job(row, kind=spec["kind"], search_param=spec["search_param"])
+        for row in values
+        if isinstance(row, dict) and str(row.get("IsDisabled") or "No").lower() != "yes"
+    ]
+    with _USAJOBS_LOCK:
+        _USAJOBS_CACHE[name] = {"fetched_at": now, "jobs": jobs}
+    return jobs
+
+
+def fetch_usajobs_agencies(*, refresh: bool = False) -> list[dict]:
+    return fetch_usajobs_codelist("agencies", refresh=refresh)
+
+
+def _filter_usajobs_jobs(jobs: list[dict], keywords: str) -> list[dict]:
+    tokens = parse_keywords(keywords)
+    if not tokens:
+        return jobs
+    return [
+        job
+        for job in jobs
+        if all(
+            token
+            in " ".join(
+                [
+                    str(job.get("title") or ""),
+                    str(job.get("company") or ""),
+                    " ".join(job.get("skills") or []),
+                ]
+            ).lower()
+            for token in tokens
+        )
+    ]
+
+
+def _usajobs_list_payload(
+    name: str,
+    *,
+    keywords: str = "",
+    refresh: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict:
+    jobs = _filter_usajobs_jobs(fetch_usajobs_codelist(name, refresh=refresh), keywords)
+    page = jobs[offset:] if limit is None else jobs[offset : offset + limit]
+    return {
+        "ok": True,
+        "source": USAJOBS_CODELISTS[name]["url"],
+        "list": name,
+        "jobs": page,
+        "count": len(page),
+        "total": len(jobs),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def filter_jobs(
@@ -312,7 +589,7 @@ def _page(jobs: list[dict], limit: int | None, offset: int) -> list[dict]:
 def _empty_cache_hint() -> str:
     return (
         "No listings in cache. POST /api/scrape?keywords=python,fastapi first, "
-        "or call /api/recommend with refresh=true."
+        "wait for the twice-daily scrape, or call /api/recommend with refresh=true."
     )
 
 
@@ -382,6 +659,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
     DATA_FILE.parent.mkdir(exist_ok=True)
     if DATA_FILE.exists():
         DATA_FILE.unlink()
+    run_id = start_scrape_run(keywords, location, platform)
     cmd = [
         sys.executable,
         "-m",
@@ -399,17 +677,28 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
         "-s",
         "LOG_LEVEL=WARNING",
     ]
-    result = subprocess.run(
-        cmd,
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=SCRAPE_TIMEOUT,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=SCRAPE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        finish_scrape_run(run_id, job_count_value=0, error="timeout")
+        raise
+    except Exception as exc:
+        finish_scrape_run(run_id, job_count_value=0, error=str(exc)[:2000])
+        raise
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "Scrapy crawl failed").strip()
+        finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
         raise HTTPException(status_code=502, detail=detail[-2000:])
+    this_run = load_jobs_json()
+    saved = upsert_jobs(this_run)
+    finish_scrape_run(run_id, job_count_value=len(this_run) or saved)
 
 
 def _resume_response(parsed: dict, include_raw: bool) -> dict:
@@ -546,22 +835,37 @@ async def _load_resume_upload(request: Request, file: UploadFile | None) -> tupl
 
 @app.get("/api/health")
 def health():
+    mysql = mysql_health()
     return {
         "ok": True,
         "service": "job-discovery",
         "jobs_list": True,
         "jobs_recommend": True,
+        "usajobs_agencies": True,
+        "usajobs_series": True,
         "resume_parse": True,
         "ats_score": True,
         "cv_from_job": True,
         "pdf_docx_convert": True,
         "resume_formats": ["pdf", "docx", "txt"],
+        "mysql": mysql,
+        "scrape_schedule": {
+            "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
+            "tz": _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata",
+            "hours": _schedule_hours(),
+        },
     }
 
 
 @app.get("/")
 def home():
     return FileResponse(INDEX_FILE)
+
+
+@app.get("/dashboard")
+@app.get("/dashboard.html")
+def dashboard_page():
+    return FileResponse(DASHBOARD_FILE)
 
 
 @app.get("/api/filters")
@@ -587,6 +891,7 @@ def filters():
             "Dice",
             "Y Combinator",
             "Hacker News",
+            "USAJobs",
         ],
         "days": [1, 3, 7, 30],
     }
@@ -610,8 +915,31 @@ def get_jobs(
         "total": len(jobs),
         "limit": limit,
         "offset": offset,
+        "source": "mysql" if mysql_configured() else "json",
         **cache_meta(),
     }
+
+
+@app.get("/api/usajobs/agencies")
+def usajobs_agencies(
+    keywords: str = Query("", description="Comma-separated agency name / code / acronym filter"),
+    refresh: bool = Query(False, description="Bypass the 1-hour in-memory cache"),
+    limit: int | None = Query(None, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+):
+    """Test bind: USAJobs agency subelements mapped into the dashboard job-card shape."""
+    return _usajobs_list_payload("agencies", keywords=keywords, refresh=refresh, limit=limit, offset=offset)
+
+
+@app.get("/api/usajobs/series")
+def usajobs_series(
+    keywords: str = Query("", description="Comma-separated series name / code / job-family filter"),
+    refresh: bool = Query(False, description="Bypass the 1-hour in-memory cache"),
+    limit: int | None = Query(None, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+):
+    """Test bind: USAJobs occupational series mapped into the dashboard job-card shape."""
+    return _usajobs_list_payload("series", keywords=keywords, refresh=refresh, limit=limit, offset=offset)
 
 
 @app.post("/api/scrape")
@@ -632,10 +960,34 @@ def scrape_jobs(
         SCRAPE_LOCK.release()
     jobs = [
         job
-        for job in load_jobs()
+        for job in load_jobs_json()
         if is_usa_job(job.get("state") or "", job.get("location") or "")
     ]
-    return {"jobs": jobs, "count": len(jobs), **cache_meta()}
+    return {
+        "jobs": jobs,
+        "count": len(jobs),
+        "saved_to": "mysql" if mysql_configured() else "json",
+        "db_total": mysql_job_count() if mysql_configured() else len(jobs),
+        **cache_meta(),
+    }
+
+
+@app.get("/api/scrape/status")
+def scrape_status():
+    return {
+        "ok": True,
+        "running": SCRAPE_LOCK.locked(),
+        "mysql": mysql_health(),
+        "schedule": {
+            "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
+            "tz": _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata",
+            "hours": _schedule_hours(),
+            "keywords": _env("SCRAPE_KEYWORDS", "python,javascript,react,java,aws"),
+            "state": _env("SCRAPE_STATE", "All") or "All",
+            "platform": _env("SCRAPE_PLATFORM", "All") or "All",
+        },
+        **cache_meta(),
+    }
 
 
 @app.get("/api/recommend")

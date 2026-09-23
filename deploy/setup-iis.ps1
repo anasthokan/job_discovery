@@ -27,6 +27,20 @@ Push-Location $AppRoot
 python -m pip install -r requirements.txt
 Pop-Location
 
+$envFile = Join-Path $AppRoot ".env"
+$envExample = Join-Path $AppRoot ".env.example"
+if (-not (Test-Path $envFile)) {
+  if (Test-Path $envExample) {
+    Copy-Item $envExample $envFile
+    Write-Host "Created $envFile from .env.example." -ForegroundColor Yellow
+    Write-Host "EDIT IT NOW: set MYSQL_HOST / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DATABASE then continue." -ForegroundColor Yellow
+  } else {
+    Write-Host "Missing .env - MySQL save + scheduled scrape will stay off until you add one." -ForegroundColor Yellow
+  }
+} else {
+  Write-Host "Using existing .env for MySQL + scrape schedule." -ForegroundColor Green
+}
+
 Write-Host "==> Firewall TCP $Port..." -ForegroundColor Cyan
 $fwName = "Job Discovery IIS $Port"
 if (-not (Get-NetFirewallRule -DisplayName $fwName -ErrorAction SilentlyContinue)) {

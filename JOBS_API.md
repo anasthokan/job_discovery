@@ -12,11 +12,12 @@ Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`
 
 ## What it does
 
-1. **Listings** — return cached US job listings (title, company, skills, location, board, apply URL)
-2. **Scrape** — refresh the cache from public job boards
+1. **Listings** — return US job listings (title, company, skills, location, board, apply URL)
+2. **Scrape** — refresh from public job boards and **upsert into MySQL** (JSON file is a backup)
 3. **Recommend** — rank those listings against candidate skills (or a resume)
+4. **Schedule** — scrape runs **twice a day** (default 08:00 and 20:00 IST) so the database stays fresh
 
-Listings come from the last scrape. If `count` is `0`, scrape first (or call recommend with `refresh= true`).
+Listings come from MySQL when `.env` has `MYSQL_*` set, otherwise from the last `data/jobs.json` scrape. If `count` is `0`, scrape first (or call recommend with `refresh= true`).
 
 US jobs only. Remote + named US states. Foreign listings are dropped.
 
@@ -27,7 +28,8 @@ US jobs only. Remote + named US states. Foreign listings are dropped.
 | GET | `/api/health` | Liveness (`jobs_list` and `jobs_recommend`) |
 | GET | `/api/filters` | States, boards, and day options for dropdowns |
 | GET | `/api/jobs` | Cached listings, filterable |
-| POST | `/api/scrape` | Scrape boards, then return US listings |
+| POST | `/api/scrape` | Scrape boards, save to MySQL, return this run |
+| GET | `/api/scrape/status` | MySQL + last scrape + next schedule |
 | GET | `/api/recommend` | Contract |
 | POST | `/api/recommend` | Rank listings from a skill list or resume JSON/text |
 | POST | `/api/recommend/file` | Upload a resume file, then rank listings |
@@ -77,6 +79,10 @@ curl -X POST "{BASE_URL}/api/scrape?keywords=python,react&state=All&platform=All
 ```
 
 `409` if another scrape is already running. `504` if it exceeds 5 minutes.
+
+This run is upserted into MySQL (`jobs` table) when `.env` has credentials. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice.
+
+A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Kolkata` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`).
 
 Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recommend`.
 

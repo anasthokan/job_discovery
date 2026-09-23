@@ -8,7 +8,7 @@ Local example: `http://127.0.0.1:9001`
 
 Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/docs)
 
-Related APIs: `RESUME_API.md`, `JOBS_API.md`, `CV_API.md`, `CONVERT_API.md`
+Related APIs: `RESUME_API.md`, `JOBS_API.md`, `CV_API.md`, `CONVERT_API.md`, `TOOLS_API.md`
 
 Sample files in this repo: `samples/sample-resume.txt` and `samples/sample-job-description.txt`.
 

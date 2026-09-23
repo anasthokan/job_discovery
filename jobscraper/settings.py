@@ -34,6 +34,7 @@ FEEDS = {
 
 ITEM_PIPELINES = {
     "jobscraper.pipelines.DedupePipeline": 300,
+    "jobscraper.pipelines.MysqlPipeline": 400,
 }
 
 REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"

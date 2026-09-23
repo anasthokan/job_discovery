@@ -8,7 +8,7 @@ Local example: `http://127.0.0.1:9001`
 
 Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/docs)
 
-Related APIs: `JOBS_API.md`, `RESUME_API.md`, `ATS_API.md`, `CV_API.md`
+Related APIs: `JOBS_API.md`, `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `TOOLS_API.md`
 
 ## What it does
 

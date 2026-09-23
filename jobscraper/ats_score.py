@@ -70,11 +70,17 @@ def score_resume(
     if match:
         checks.extend(_match_checks(match))
     suggestions = [item["message"] for item in checks if not item["ok"]]
+    matched_keywords = list((match or {}).get("matched_skills") or [])
+    suggested_additions = list((match or {}).get("missing_skills") or [])
+    echoed_title = (job or {}).get("title") or job_title
     return {
         "ok": True,
         "score": score,
         "grade": _grade(score),
         "label": _label(score),
+        "job_title": echoed_title,
+        "matched_keywords": matched_keywords,
+        "suggested_additions": suggested_additions,
         "breakdown": breakdown,
         "checks": checks,
         "suggestions": suggestions,
