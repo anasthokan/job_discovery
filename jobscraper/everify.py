@@ -100,9 +100,13 @@ def load_rows_from_csv(path: Path | None = None) -> list[dict]:
     path = path or csv_path()
     if not path.exists():
         return []
-    text = path.read_text(encoding="utf-8-sig", errors="replace")
-    if not text.strip():
+    data = path.read_bytes()
+    if not data.strip():
         return []
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        text = data.decode("utf-16")
+    else:
+        text = data.decode("utf-8-sig", errors="replace")
     return parse_employer_rows(text)
 
 
