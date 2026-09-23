@@ -24,10 +24,12 @@ log = logging.getLogger("jobscraper.db")
 _LOCK = threading.Lock()
 _CONN = None
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_EVERIFY_INDEX: dict | None = None
 
 # Dedicated names so we never write into an existing ezyjob `jobs` table.
 JOBS_TABLE = "job_discovery_jobs"
 RUNS_TABLE = "job_discovery_scrape_runs"
+EVERIFY_TABLE = "job_discovery_everify_employers"
 
 CREATE_JOBS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
@@ -41,12 +43,29 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   days_ago INT NOT NULL DEFAULT 0,
   url VARCHAR(512) NULL,
   posted_at VARCHAR(64) NULL,
+  e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  e_verify_name VARCHAR(512) NULL,
   first_seen_at DATETIME NOT NULL,
   last_seen_at DATETIME NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jd_jobs_url (url),
   KEY idx_jd_jobs_platform (platform),
-  KEY idx_jd_jobs_last_seen (last_seen_at)
+  KEY idx_jd_jobs_last_seen (last_seen_at),
+  KEY idx_jd_jobs_everify (e_verified)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+CREATE_EVERIFY_SQL = f"""
+CREATE TABLE IF NOT EXISTS {EVERIFY_TABLE} (
+  name_key VARCHAR(255) NOT NULL,
+  employer VARCHAR(512) NOT NULL,
+  dba VARCHAR(512) NULL,
+  account_status VARCHAR(64) NULL,
+  everify_plus VARCHAR(32) NULL,
+  date_enrolled VARCHAR(64) NULL,
+  hiring_sites VARCHAR(512) NULL,
+  PRIMARY KEY (name_key),
+  KEY idx_jd_everify_status (account_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -177,7 +196,24 @@ def close_conn() -> None:
             _CONN = None
 
 
+def _ensure_job_columns(cur) -> None:
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verified'")
+    if not cur.fetchone():
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} "
+            "ADD COLUMN e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown'"
+        )
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verify_name'")
+    if not cur.fetchone():
+        cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN e_verify_name VARCHAR(512) NULL")
+    try:
+        cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
+    except Exception:
+        pass
+
+
 def init_db() -> bool:
+    global _EVERIFY_INDEX
     cfg = mysql_config()
     if not cfg:
         log.info("MySQL not configured; jobs stay in data/jobs.json")
@@ -190,6 +226,15 @@ def init_db() -> bool:
         with conn.cursor() as cur:
             cur.execute(CREATE_JOBS_SQL)
             cur.execute(CREATE_RUNS_SQL)
+            cur.execute(CREATE_EVERIFY_SQL)
+            _ensure_job_columns(cur)
+        _EVERIFY_INDEX = None
+        from jobscraper.everify import load_rows_from_csv
+
+        rows = load_rows_from_csv()
+        if rows:
+            replace_everify_employers(rows)
+            enrich_jobs_everify()
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
         return True
     except Exception:
@@ -307,6 +352,8 @@ def _job_from_row(row: dict) -> dict:
         "daysAgo": days,
         "url": row.get("url") or "",
         "posted_at": posted,
+        "e_verified": row.get("e_verified") or "unknown",
+        "e_verify_name": row.get("e_verify_name"),
     }
 
 
@@ -320,7 +367,8 @@ def load_jobs() -> list[dict]:
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id, title, company, skills, state, location, platform, "
-                f"days_ago, url, posted_at FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
+                f"days_ago, url, posted_at, e_verified, e_verify_name "
+                f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []
         return [_job_from_row(row) for row in rows]
@@ -422,6 +470,119 @@ def last_scrape_meta() -> dict:
         return empty
 
 
+def replace_everify_employers(rows: list[dict]) -> int:
+    global _EVERIFY_INDEX
+    from jobscraper.everify import build_index, normalize_name
+
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    payload = []
+    seen = set()
+    for row in rows:
+        for name in (row.get("employer"), row.get("dba")):
+            key = normalize_name(name or "")[:255]
+            if len(key) < 4 or key in seen:
+                continue
+            seen.add(key)
+            payload.append(
+                (
+                    key,
+                    (row.get("employer") or name or "")[:512],
+                    (row.get("dba") or None),
+                    (row.get("account_status") or None),
+                    (row.get("everify_plus") or None),
+                    (row.get("date_enrolled") or None),
+                    (row.get("hiring_sites") or None),
+                )
+            )
+    with _LOCK:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {EVERIFY_TABLE}")
+            if payload:
+                cur.executemany(
+                    f"INSERT INTO {EVERIFY_TABLE} "
+                    "(name_key, employer, dba, account_status, everify_plus, date_enrolled, hiring_sites) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    payload,
+                )
+    _EVERIFY_INDEX = build_index(rows)
+    return len(payload)
+
+
+def everify_index() -> dict:
+    global _EVERIFY_INDEX
+    from jobscraper.everify import build_index
+
+    if _EVERIFY_INDEX is not None:
+        return _EVERIFY_INDEX
+    rows = []
+    if mysql_configured():
+        conn = get_conn()
+        if conn is not None:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT employer, dba, account_status, everify_plus, date_enrolled, hiring_sites "
+                        f"FROM {EVERIFY_TABLE}"
+                    )
+                    rows = list(cur.fetchall() or [])
+            except Exception:
+                close_conn()
+                rows = []
+    _EVERIFY_INDEX = build_index(rows)
+    return _EVERIFY_INDEX
+
+
+def everify_count() -> int:
+    if not mysql_configured():
+        return 0
+    try:
+        conn = get_conn()
+        if conn is None:
+            return 0
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS n FROM {EVERIFY_TABLE}")
+            row = cur.fetchone() or {}
+        return int(row.get("n") or 0)
+    except Exception:
+        close_conn()
+        return 0
+
+
+def enrich_jobs_everify() -> dict:
+    from jobscraper.everify import match_company
+
+    if not mysql_configured():
+        return {"updated": 0, "yes": 0, "unknown": 0, "employers": everify_count()}
+    conn = get_conn()
+    if conn is None:
+        return {"updated": 0, "yes": 0, "unknown": 0, "employers": 0}
+    index = everify_index()
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT id, company FROM {JOBS_TABLE}")
+        jobs = list(cur.fetchall() or [])
+        yes = 0
+        unknown = 0
+        for job in jobs:
+            hit = match_company(job.get("company") or "", index)
+            if hit:
+                yes += 1
+                status = "yes"
+                name = hit.get("employer") or hit.get("dba")
+            else:
+                unknown += 1
+                status = "unknown"
+                name = None
+            cur.execute(
+                f"UPDATE {JOBS_TABLE} SET e_verified = %s, e_verify_name = %s WHERE id = %s",
+                (status, name, job.get("id")),
+            )
+    return {"updated": len(jobs), "yes": yes, "unknown": unknown, "employers": everify_count()}
+
+
 def health() -> dict:
     cfg = mysql_config()
     if not cfg:
@@ -439,6 +600,7 @@ def health() -> dict:
             "database": cfg["database"],
             "jobs_table": JOBS_TABLE,
             "jobs": job_count(),
+            "everify_employers": everify_count(),
             **{k: v for k, v in last_scrape_meta().items() if k in {"scraped_at", "status"}},
         }
     except Exception as exc:

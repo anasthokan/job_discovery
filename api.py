@@ -42,6 +42,8 @@ from jobscraper.recommend import (
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
 from jobscraper.db import (
     close_conn as close_mysql,
+    enrich_jobs_everify,
+    everify_count,
     finish_scrape_run,
     health as mysql_health,
     import_json_if_empty,
@@ -50,6 +52,7 @@ from jobscraper.db import (
     last_scrape_meta,
     load_jobs as load_jobs_mysql,
     mysql_configured,
+    replace_everify_employers,
     start_scrape_run,
     upsert_jobs,
 )
@@ -700,6 +703,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
     this_run = load_jobs_json()
     try:
         saved = upsert_jobs(this_run)
+        enrich_jobs_everify()
     except Exception as exc:
         detail = f"MySQL save failed: {exc}"
         finish_scrape_run(run_id, job_count_value=0, error=detail[:2000])
@@ -910,10 +914,14 @@ def get_jobs(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
+    e_verified: str = Query("", description="yes, unknown, or empty for all"),
     limit: int | None = Query(None, ge=1, le=200, description="Optional page size. Omit to return all matches."),
     offset: int = Query(0, ge=0),
 ):
     jobs = filter_jobs(load_jobs(), parse_keywords(keywords), state, platform, days, city)
+    wanted = e_verified.strip().lower()
+    if wanted in {"yes", "unknown"}:
+        jobs = [job for job in jobs if (job.get("e_verified") or "unknown") == wanted]
     page = _page(jobs, limit, offset)
     return {
         "jobs": page,
@@ -994,6 +1002,51 @@ def scrape_status():
         },
         **cache_meta(),
     }
+
+
+@app.get("/api/everify/status")
+def everify_status():
+    from jobscraper.everify import csv_path
+
+    path = csv_path()
+    return {
+        "ok": True,
+        "source": "https://www.e-verify.gov/e-verify-employer-search",
+        "csv": str(path),
+        "csv_exists": path.exists(),
+        "employers": everify_count() if mysql_configured() else 0,
+        "note": (
+            "Export the employer table from the E-Verify search tool "
+            "(Download → Crosstab/Data) and save as data/everify_employers.csv, "
+            "then POST /api/everify/refresh. Unmatched companies stay unknown."
+        ),
+    }
+
+
+@app.get("/api/everify/lookup")
+def everify_lookup(company: str = Query(..., min_length=2)):
+    from jobscraper.everify import lookup
+
+    return {"ok": True, "company": company, **lookup(company)}
+
+
+@app.post("/api/everify/refresh")
+def everify_refresh():
+    from jobscraper.everify import csv_path, load_rows_from_csv
+
+    path = csv_path()
+    rows = load_rows_from_csv(path)
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No E-Verify CSV at {path}. Download the employer list from "
+                "https://www.e-verify.gov/e-verify-employer-search and save it there."
+            ),
+        )
+    loaded = replace_everify_employers(rows)
+    stats = enrich_jobs_everify()
+    return {"ok": True, "loaded": loaded, **stats}
 
 
 @app.get("/api/recommend")

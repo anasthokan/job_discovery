@@ -88,6 +88,24 @@ A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/K
 
 Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recommend`.
 
+## E-Verify flag
+
+Each listing can include `e_verified`: `yes` or `unknown` (company name matched against the public [E-Verify Employer Search](https://www.e-verify.gov/e-verify-employer-search) list). `unknown` is not a confirmed No — names often differ (legal vs DBA).
+
+Export the employer table from that page (Download → Crosstab/Data), save as `data/everify_employers.csv`, then:
+
+```bash
+curl -X POST "{BASE_URL}/api/everify/refresh"
+curl "{BASE_URL}/api/jobs?e_verified=yes&limit=20"
+curl "{BASE_URL}/api/everify/lookup?company=Microsoft"
+```
+
+| Method | Path | Use |
+| --- | --- | --- |
+| GET | `/api/everify/status` | CSV path + loaded employer count |
+| GET | `/api/everify/lookup` | Check one company name |
+| POST | `/api/everify/refresh` | Reload CSV and rematch all saved jobs |
+
 ## Recommend from skills
 
 ```bash
