@@ -1,3 +1,4 @@
+import asyncio
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -28,6 +29,8 @@ from jobscraper.boards import (
     WWR_FEEDS,
 )
 from jobscraper.items import JobItem
+from jobscraper.jobspy_source import scrape as scrape_jobspy
+from jobscraper.jobspy_source import sites_for_platform
 from jobscraper.locations import is_usa_job, muse_location, parse_state
 
 HTML_RE = re.compile(r"<[^>]+>")
@@ -374,6 +377,40 @@ class JobsSpider(scrapy.Spider):
                 errback=self.errback,
                 headers=headers,
             )
+
+        jobspy_sites = sites_for_platform(selected)
+        if jobspy_sites:
+            single_board = selected != "All"
+            try:
+                rows = await asyncio.to_thread(
+                    scrape_jobspy,
+                    queries,
+                    where,
+                    jobspy_sites,
+                    is_remote=remote,
+                    results_wanted=25 if single_board else 12,
+                    max_terms=3 if single_board else 2,
+                )
+            except Exception:
+                self.logger.exception("JobSpy scrape failed")
+                rows = []
+            self.logger.info("JobSpy returned %s jobs from %s", len(rows), ", ".join(jobspy_sites))
+            for row in rows:
+                location = row.get("location") or ""
+                for item in self._emit(
+                    id=row["id"],
+                    title=row["title"],
+                    company=row["company"],
+                    skills=row.get("skills") or [],
+                    state=parse_state(location),
+                    location=location,
+                    platform=row["platform"],
+                    daysAgo=days_ago(row.get("posted_at")),
+                    url=row["url"],
+                    posted_at=row.get("posted_at") or "",
+                    search_text=row.get("search_text") or "",
+                ):
+                    yield item
 
     def errback(self, failure):
         self.logger.warning("Source request failed: %s", failure.value)

@@ -9,3 +9,5 @@ pymysql>=1.1.0
 python-dotenv>=1.0.0
 apscheduler>=3.10.0
 tzdata>=2024.1
+# PyPI 1.1.82 pins numpy==1.26.3 (no Python 3.13 wheel). Git main allows numpy>=1.26.
+python-jobspy @ git+https://github.com/speedyapply/JobSpy.git
