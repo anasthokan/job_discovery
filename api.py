@@ -685,6 +685,7 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
             text=True,
             timeout=SCRAPE_TIMEOUT,
             check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
         )
     except subprocess.TimeoutExpired:
         finish_scrape_run(run_id, job_count_value=0, error="timeout")
@@ -697,7 +698,12 @@ def run_spider(keywords: str, location: str, platform: str, city: str = "") -> N
         finish_scrape_run(run_id, job_count_value=0, error=detail[-2000:])
         raise HTTPException(status_code=502, detail=detail[-2000:])
     this_run = load_jobs_json()
-    saved = upsert_jobs(this_run)
+    try:
+        saved = upsert_jobs(this_run)
+    except Exception as exc:
+        detail = f"MySQL save failed: {exc}"
+        finish_scrape_run(run_id, job_count_value=0, error=detail[:2000])
+        raise HTTPException(status_code=502, detail=detail[:2000]) from exc
     finish_scrape_run(run_id, job_count_value=len(this_run) or saved)
 
 

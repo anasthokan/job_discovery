@@ -1,9 +1,6 @@
-CREATE DATABASE IF NOT EXISTS job_discovery
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE ezyjob_master;
 
-USE job_discovery;
-
-CREATE TABLE IF NOT EXISTS jobs (
+CREATE TABLE IF NOT EXISTS job_discovery_jobs (
   id VARCHAR(255) NOT NULL,
   title VARCHAR(512) NOT NULL,
   company VARCHAR(512) NOT NULL,
@@ -17,12 +14,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   first_seen_at DATETIME NOT NULL,
   last_seen_at DATETIME NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_jobs_url (url),
-  KEY idx_jobs_platform (platform),
-  KEY idx_jobs_last_seen (last_seen_at)
+  UNIQUE KEY uk_jd_jobs_url (url),
+  KEY idx_jd_jobs_platform (platform),
+  KEY idx_jd_jobs_last_seen (last_seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE IF NOT EXISTS scrape_runs (
+CREATE TABLE IF NOT EXISTS job_discovery_scrape_runs (
   id BIGINT NOT NULL AUTO_INCREMENT,
   started_at DATETIME NOT NULL,
   finished_at DATETIME NULL,
@@ -33,5 +30,5 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
   status VARCHAR(32) NOT NULL DEFAULT 'running',
   error TEXT NULL,
   PRIMARY KEY (id),
-  KEY idx_scrape_runs_started (started_at)
+  KEY idx_jd_scrape_runs_started (started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

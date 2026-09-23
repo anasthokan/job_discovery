@@ -25,8 +25,12 @@ _LOCK = threading.Lock()
 _CONN = None
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
-CREATE_JOBS_SQL = """
-CREATE TABLE IF NOT EXISTS jobs (
+# Dedicated names so we never write into an existing ezyjob `jobs` table.
+JOBS_TABLE = "job_discovery_jobs"
+RUNS_TABLE = "job_discovery_scrape_runs"
+
+CREATE_JOBS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   id VARCHAR(255) NOT NULL,
   title VARCHAR(512) NOT NULL,
   company VARCHAR(512) NOT NULL,
@@ -40,14 +44,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   first_seen_at DATETIME NOT NULL,
   last_seen_at DATETIME NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_jobs_url (url),
-  KEY idx_jobs_platform (platform),
-  KEY idx_jobs_last_seen (last_seen_at)
+  UNIQUE KEY uk_jd_jobs_url (url),
+  KEY idx_jd_jobs_platform (platform),
+  KEY idx_jd_jobs_last_seen (last_seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
-CREATE_RUNS_SQL = """
-CREATE TABLE IF NOT EXISTS scrape_runs (
+CREATE_RUNS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
   id BIGINT NOT NULL AUTO_INCREMENT,
   started_at DATETIME NOT NULL,
   finished_at DATETIME NULL,
@@ -58,12 +62,12 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
   status VARCHAR(32) NOT NULL DEFAULT 'running',
   error TEXT NULL,
   PRIMARY KEY (id),
-  KEY idx_scrape_runs_started (started_at)
+  KEY idx_jd_scrape_runs_started (started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
-UPSERT_SQL = """
-INSERT INTO jobs (
+UPSERT_SQL = f"""
+INSERT INTO {JOBS_TABLE} (
   id, title, company, skills, state, location, platform, days_ago, url, posted_at,
   first_seen_at, last_seen_at
 ) VALUES (
@@ -248,10 +252,15 @@ def upsert_jobs(jobs: list[dict]) -> int:
     conn = get_conn()
     if conn is None:
         return 0
-    with _LOCK:
-        with conn.cursor() as cur:
-            cur.executemany(UPSERT_SQL, rows)
+    try:
+        with _LOCK:
+            with conn.cursor() as cur:
+                cur.executemany(UPSERT_SQL, rows)
         return len(rows)
+    except Exception:
+        close_conn()
+        log.exception("MySQL upsert failed")
+        raise
 
 
 def _parse_skills(value) -> list[str]:
@@ -310,8 +319,8 @@ def load_jobs() -> list[dict]:
             return []
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, title, company, skills, state, location, platform, "
-                "days_ago, url, posted_at FROM jobs ORDER BY last_seen_at DESC"
+                f"SELECT id, title, company, skills, state, location, platform, "
+                f"days_ago, url, posted_at FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []
         return [_job_from_row(row) for row in rows]
@@ -329,7 +338,7 @@ def job_count() -> int:
         if conn is None:
             return 0
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS n FROM jobs")
+            cur.execute(f"SELECT COUNT(*) AS n FROM {JOBS_TABLE}")
             row = cur.fetchone() or {}
         return int(row.get("n") or 0)
     except Exception:
@@ -346,7 +355,7 @@ def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:
             return None
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scrape_runs (started_at, keywords, state, platform, status) "
+                f"INSERT INTO {RUNS_TABLE} (started_at, keywords, state, platform, status) "
                 "VALUES (UTC_TIMESTAMP(), %s, %s, %s, 'running')",
                 (keywords[:512] if keywords else None, state or None, platform or None),
             )
@@ -367,7 +376,7 @@ def finish_scrape_run(run_id: int | None, *, job_count_value: int, error: str | 
             return
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE scrape_runs SET finished_at = UTC_TIMESTAMP(), job_count = %s, "
+                f"UPDATE {RUNS_TABLE} SET finished_at = UTC_TIMESTAMP(), job_count = %s, "
                 "status = %s, error = %s WHERE id = %s",
                 (job_count_value, status, (error or "")[:4000] or None, run_id),
             )
@@ -386,7 +395,7 @@ def last_scrape_meta() -> dict:
             return empty
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT finished_at, job_count, status FROM scrape_runs "
+                f"SELECT finished_at, job_count, status FROM {RUNS_TABLE} "
                 "WHERE status = 'ok' AND finished_at IS NOT NULL "
                 "ORDER BY finished_at DESC LIMIT 1"
             )
@@ -428,6 +437,7 @@ def health() -> dict:
             "ok": True,
             "host": cfg["host"],
             "database": cfg["database"],
+            "jobs_table": JOBS_TABLE,
             "jobs": job_count(),
             **{k: v for k, v in last_scrape_meta().items() if k in {"scraped_at", "status"}},
         }
