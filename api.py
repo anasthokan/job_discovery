@@ -60,7 +60,7 @@ DATA_FILE = ROOT / "data" / "jobs.json"
 INDEX_FILE = ROOT / "index.html"
 DASHBOARD_FILE = ROOT / "dashboard.html"
 SCRAPE_LOCK = threading.Lock()
-SCRAPE_TIMEOUT = 300
+SCRAPE_TIMEOUT = 360
 log = logging.getLogger("job-discovery")
 USAJOBS_CACHE_TTL = 3600
 USAJOBS_CODELISTS = {
@@ -109,7 +109,7 @@ def scheduled_scrape() -> None:
         log.warning("Scheduled scrape skipped: another scrape is running")
         return
     try:
-        keywords = _env("SCRAPE_KEYWORDS", "python,javascript,react,java,aws")
+        keywords = _env("SCRAPE_KEYWORDS", "")
         state = _env("SCRAPE_STATE", "All") or "All"
         platform = _env("SCRAPE_PLATFORM", "All") or "All"
         city = _env("SCRAPE_CITY", "")
@@ -988,7 +988,7 @@ def scrape_status():
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),
             "tz": _env("SCRAPE_TZ", "Asia/Kolkata") or "Asia/Kolkata",
             "hours": _schedule_hours(),
-            "keywords": _env("SCRAPE_KEYWORDS", "python,javascript,react,java,aws"),
+            "keywords": _env("SCRAPE_KEYWORDS", ""),
             "state": _env("SCRAPE_STATE", "All") or "All",
             "platform": _env("SCRAPE_PLATFORM", "All") or "All",
         },

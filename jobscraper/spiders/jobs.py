@@ -60,6 +60,7 @@ def _token_in_blob(word: str, blob: str) -> bool:
 
 
 def matches_keywords(keywords, *parts) -> bool:
+    """True if no keywords, or if ANY keyword appears (OR)."""
     if not keywords:
         return True
     blob = normalize_text(" ".join(str(part or "") for part in parts))
@@ -68,12 +69,11 @@ def matches_keywords(keywords, *parts) -> bool:
         if not kw:
             continue
         if kw in blob:
-            continue
+            return True
         words = kw.split()
         if words and all(_token_in_blob(word, blob) for word in words):
-            continue
-        return False
-    return True
+            return True
+    return False
 
 
 def days_ago(value) -> int:
@@ -118,6 +118,54 @@ def split_company_title(raw: str) -> tuple[str, str]:
     return "Unknown", text
 
 
+MUSE_CATEGORIES = (
+    "Software Engineering",
+    "Engineering",
+    "Data Science",
+    "IT",
+    "Design",
+    "UX",
+    "Product",
+    "Marketing",
+    "Sales",
+    "Customer Service",
+    "Account Management",
+    "HR",
+    "Recruiting",
+    "Finance",
+    "Accounting",
+    "Project Management",
+    "Operations",
+    "Legal",
+    "Writing",
+    "Education",
+    "Data and Analytics",
+    "Science and Biotech",
+    "Healthcare",
+    "Nursing",
+    "Administrative",
+)
+
+# Used for LinkedIn/Dice when no keyword filter is set (all fields).
+DEFAULT_SEARCH_QUERIES = (
+    "software engineer",
+    "data analyst",
+    "product manager",
+    "marketing manager",
+    "sales representative",
+    "registered nurse",
+    "accountant",
+    "human resources",
+    "customer service",
+    "project manager",
+    "graphic designer",
+    "operations manager",
+    "teacher",
+    "legal assistant",
+    "warehouse associate",
+)
+
+
 class JobsSpider(scrapy.Spider):
     """Public job APIs + company ATS boards, filtered by keyword."""
 
@@ -129,6 +177,11 @@ class JobsSpider(scrapy.Spider):
         self.location = location or "All"
         self.city = city or ""
         self.platform = platform or "All"
+
+    def _search_queries(self) -> list[str]:
+        if self.keywords:
+            return list(self.keywords)
+        return list(DEFAULT_SEARCH_QUERIES)
 
     def _search_query(self) -> str:
         return " ".join(self.keywords) if self.keywords else "software engineer"
@@ -191,17 +244,8 @@ class JobsSpider(scrapy.Spider):
             )
 
         if self._wanted(selected, "The Muse"):
-            categories = (
-                "Software Engineering",
-                "Engineering",
-                "Data Science",
-                "IT",
-                "Design",
-                "UX",
-                "Product",
-            )
-            for category in categories:
-                for page in range(6):
+            for category in MUSE_CATEGORIES:
+                for page in range(4):
                     params = {"page": str(page), "descending": "true", "category": category}
                     if city_or_state and city_or_state != "Remote":
                         params["location"] = city_or_state
@@ -297,17 +341,28 @@ class JobsSpider(scrapy.Spider):
                     cb_kwargs={"company": account},
                 )
 
-        query = self._search_query()
+        queries = self._search_queries()
         where = self._search_location()
         remote = self.location == "Remote"
+        # One page per query when scraping many fields so the crawl stays under timeout.
+        linkedin_pages = None if self.keywords and len(self.keywords) <= 3 else 1
+        dice_pages = None if self.keywords and len(self.keywords) <= 3 else 1
 
         if self._wanted(selected, "LinkedIn"):
-            for url in linkedin_search_urls(query, where, remote):
-                yield self._jina_request(url, self.parse_linkedin)
+            for query in queries:
+                urls = linkedin_search_urls(query, where, remote)
+                if linkedin_pages:
+                    urls = urls[:linkedin_pages]
+                for url in urls:
+                    yield self._jina_request(url, self.parse_linkedin)
 
         if self._wanted(selected, "Dice"):
-            for url in dice_search_urls(query, where):
-                yield self._jina_request(url, self.parse_dice)
+            for query in queries:
+                urls = dice_search_urls(query, where)
+                if dice_pages:
+                    urls = urls[:dice_pages]
+                for url in urls:
+                    yield self._jina_request(url, self.parse_dice)
 
         if self._wanted(selected, "Y Combinator"):
             yield self._jina_request(yc_jobs_url(), self.parse_yc)

@@ -75,14 +75,16 @@ Query flags:
 ## Refresh listings (scrape)
 
 ```bash
-curl -X POST "{BASE_URL}/api/scrape?keywords=python,react&state=All&platform=All&days=7"
+curl -X POST "{BASE_URL}/api/scrape?keywords=&state=All&platform=All&days=7"
 ```
 
 `409` if another scrape is already running. `504` if it exceeds 5 minutes.
 
 This run is upserted into MySQL (`job_discovery_jobs`) when `.env` has credentials. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice. This does not use an existing `jobs` table in the same database.
 
-A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Kolkata` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`).
+Omit `keywords` (or send empty) to scrape **all fields**. If you pass `python,react`, a job matching **either** token is kept.
+
+A background scheduler also calls the same scrape at **08:00 and 20:00** `Asia/Kolkata` (override with `SCRAPE_HOURS` / `SCRAPE_TZ` in `.env`). Empty `SCRAPE_KEYWORDS` pulls **all job fields** (engineering, marketing, sales, HR, healthcare, finance, …). Comma-separated scrape keywords match **any** token (OR).
 
 Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recommend`.
 
