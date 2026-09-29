@@ -1027,6 +1027,34 @@ def everify_status():
     }
 
 
+@app.get("/api/everify/filters")
+def everify_filters():
+    """Dropdown values for the E-Verify Checker form."""
+    from jobscraper.everify import filter_options
+
+    return {"ok": True, **filter_options()}
+
+
+@app.get("/api/everify/search")
+def everify_search(
+    company: str = Query(..., min_length=2, description="Employer legal name or company keyword"),
+    state: str = Query("All", description="All, California, Washington, New York, Texas, or Massachusetts"),
+    industry: str = Query(
+        "All",
+        description="All, software, fintech, healthtech, or defense. Accepted and echoed; does not filter.",
+    ),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Search button on the Federal E-Verify Employer Search & STEM OPT Checker."""
+    from jobscraper.everify import search
+
+    try:
+        return search(company, state, industry, limit, offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/everify/lookup")
 def everify_lookup(company: str = Query(..., min_length=2)):
     from jobscraper.everify import lookup

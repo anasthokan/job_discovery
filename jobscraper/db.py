@@ -536,6 +536,33 @@ def everify_index() -> dict:
     return _EVERIFY_INDEX
 
 
+def everify_search_rows(company: str) -> list[dict]:
+    """Employer rows whose name or DBA contains the company keyword."""
+    from jobscraper.everify import load_rows_from_csv, normalize_name
+
+    needle = re.sub(r"[%_\\]", "", (company or "").strip())
+    key = normalize_name(needle)
+    if len(needle) < 2 and len(key) < 2:
+        return []
+    if mysql_configured():
+        conn = get_conn()
+        if conn is not None:
+            try:
+                like = f"%{needle}%"
+                key_like = f"%{key}%" if len(key) >= 2 else like
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT employer, dba, account_status, everify_plus, date_enrolled, hiring_sites "
+                        f"FROM {EVERIFY_TABLE} "
+                        f"WHERE employer LIKE %s OR dba LIKE %s OR name_key LIKE %s",
+                        (like, like, key_like),
+                    )
+                    return list(cur.fetchall() or [])
+            except Exception:
+                close_conn()
+    return load_rows_from_csv()
+
+
 def everify_count() -> int:
     if not mysql_configured():
         return 0

@@ -8,7 +8,7 @@ Local example: `http://127.0.0.1:9001`
 
 Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/docs)
 
-Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`
+Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`, `EVERIFY_API.md`
 
 ## What it does
 
@@ -99,6 +99,8 @@ curl -X POST "{BASE_URL}/api/everify/refresh"
 curl "{BASE_URL}/api/jobs?e_verified=yes&limit=20"
 curl "{BASE_URL}/api/everify/lookup?company=Microsoft"
 ```
+
+The E-Verify Checker screen (company, state, industry, STEM OPT) is `EVERIFY_API.md`. Give that file to the frontend engineer.
 
 | Method | Path | Use |
 | --- | --- | --- |
