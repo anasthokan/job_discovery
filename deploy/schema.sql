@@ -1,6 +1,6 @@
-USE ezyjob_master;
+USE ezyjob;
 
-CREATE TABLE IF NOT EXISTS job_discovery_jobs (
+CREATE TABLE IF NOT EXISTS jobs (
   id VARCHAR(255) NOT NULL,
   title VARCHAR(512) NOT NULL,
   company VARCHAR(512) NOT NULL,

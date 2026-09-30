@@ -29,8 +29,8 @@ _local = threading.local()
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _EVERIFY_INDEX: dict | None = None
 
-# Dedicated names so we never write into an existing ezyjob `jobs` table.
-JOBS_TABLE = "job_discovery_jobs"
+# Scraped listings go into the shared ezyjob database, table `jobs`.
+JOBS_TABLE = "jobs"
 RUNS_TABLE = "job_discovery_scrape_runs"
 EVERIFY_TABLE = "job_discovery_everify_employers"
 

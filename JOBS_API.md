@@ -80,7 +80,7 @@ curl -X POST "{BASE_URL}/api/scrape?keywords=&state=All&platform=All&days=7"
 
 `409` if another scrape is already running. `504` if it exceeds 5 minutes.
 
-This run is upserted into MySQL (`job_discovery_jobs`) when `.env` has credentials. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice. This does not use an existing `jobs` table in the same database.
+This run is upserted into MySQL database `ezyjob`, table `jobs`, when `.env` has `MYSQL_DATABASE=ezyjob`. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice.
 
 Omit `keywords` (or send empty) to scrape **all fields**. If you pass `python,react`, a job matching **either** token is kept.
 
