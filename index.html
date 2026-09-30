@@ -743,11 +743,22 @@
       return Boolean(abbr && hay.includes(`, ${abbr.toLowerCase()}`));
     }
 
+    function ageInDays(value) {
+      if (typeof value === "number") return value;
+      const text = String(value || "").toLowerCase();
+      if (!text || text === "just now" || text.includes("min") || text.includes("hour")) return 0;
+      const count = parseInt(text, 10);
+      if (Number.isNaN(count)) return 0;
+      if (text.includes("year")) return count * 365;
+      if (text.includes("month")) return count * 30;
+      return count;
+    }
+
     function applyFilters(resetPage = true) {
       filteredJobs = jobs.filter((job) => {
         const matchesState = jobMatchesState(job);
         const matchesPlatform = platformFilter.value === "All" || job.platform === platformFilter.value;
-        const matchesDate = (job.daysAgo || 0) <= parseInt(dateFilter.value, 10);
+        const matchesDate = ageInDays(job.daysAgo) <= parseInt(dateFilter.value, 10);
         return matchesState && matchesPlatform && matchesDate;
       });
 
@@ -778,7 +789,9 @@
         const title = job.url
           ? `<a class="job-link" href="${escapeHtml(job.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(job.title)}</a>`
           : `<span style="font-weight: 600;">${escapeHtml(job.title)}</span>`;
-        const posted = job.daysAgo === 0 ? "Today" : job.daysAgo === 1 ? "1 day ago" : `${job.daysAgo} days ago`;
+        const posted = typeof job.daysAgo === "string"
+          ? job.daysAgo
+          : job.daysAgo === 0 ? "Today" : job.daysAgo === 1 ? "1 day ago" : `${job.daysAgo} days ago`;
 
         tr.innerHTML = `
           <td>${title}</td>

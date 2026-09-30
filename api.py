@@ -431,6 +431,77 @@ def parse_keywords(raw: str) -> list[str]:
     return [part.strip().lower() for part in (raw or "").split(",") if part.strip()]
 
 
+def format_time_ago(posted_at, fallback_days: int = 0) -> str:
+    """Relative label for the job card: '2 min ago', '1 hour ago', '7 days ago', '1 month ago'."""
+    posted = _as_utc(posted_at)
+    if posted is None:
+        return _ago_from_days(fallback_days)
+    seconds = int((datetime.now(timezone.utc) - posted).total_seconds())
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = seconds // 3600
+    if hours < 24:
+        return "1 hour ago" if hours == 1 else f"{hours} hours ago"
+    days = seconds // 86400
+    if days < 30:
+        return "1 day ago" if days == 1 else f"{days} days ago"
+    months = days // 30
+    if months < 12:
+        return "1 month ago" if months == 1 else f"{months} months ago"
+    years = days // 365
+    return "1 year ago" if years == 1 else f"{years} years ago"
+
+
+def _as_utc(value) -> datetime | None:
+    if isinstance(value, datetime):
+        posted = value
+    elif value:
+        cleaned = str(value).strip().replace("Z", "+00:00")
+        try:
+            posted = datetime.fromisoformat(cleaned)
+        except ValueError:
+            return None
+    else:
+        return None
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=timezone.utc)
+    return posted
+
+
+def _ago_from_days(days: int) -> str:
+    try:
+        count = max(int(days or 0), 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return "just now"
+    if count == 1:
+        return "1 day ago"
+    if count < 30:
+        return f"{count} days ago"
+    months = count // 30
+    if months < 12:
+        return "1 month ago" if months == 1 else f"{months} months ago"
+    years = count // 365
+    return "1 year ago" if years == 1 else f"{years} years ago"
+
+
+def _with_time_ago(jobs: list[dict]) -> list[dict]:
+    presented = []
+    for job in jobs:
+        row = dict(job)
+        try:
+            fallback = int(job.get("daysAgo") or 0)
+        except (TypeError, ValueError):
+            fallback = 0
+        row["daysAgo"] = format_time_ago(job.get("posted_at"), fallback)
+        presented.append(row)
+    return presented
+
+
 def _days_ago_from_iso(value: str | None) -> int:
     if not value:
         return 0
@@ -671,7 +742,7 @@ def _recommend_payload(
         "ok": True,
         "count": len(ranked),
         "skills": skills,
-        "jobs": ranked,
+        "jobs": _with_time_ago(ranked),
         "hint": hint,
         **cache_meta(),
     }
@@ -980,7 +1051,7 @@ def get_jobs(
     )
     page = _page(jobs, limit, offset)
     return {
-        "jobs": page,
+        "jobs": _with_time_ago(page),
         "count": len(page),
         "total": len(jobs),
         "limit": limit,

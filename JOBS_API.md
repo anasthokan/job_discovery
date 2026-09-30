@@ -209,7 +209,7 @@ HTTP `200`:
       "state": "Remote",
       "location": "United States",
       "platform": "Remotive",
-      "daysAgo": 2,
+      "daysAgo": "2 days ago",
       "url": "https://...",
       "description": "Senior backend role. 5+ years of experience. Visa sponsorship available.",
       "job_type": "fulltime",
@@ -232,7 +232,7 @@ HTTP `200`:
 }
 ```
 
-Missing fields may be `null` or `[]`. `url` is the apply / posting link.
+Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 
 `work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, and `clearance_required` are saved on each row. They are read from the posting title, location, and description when the board does not send them. `unknown` means the posting never said. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
 
@@ -254,7 +254,7 @@ HTTP `200`:
       "state": "Remote",
       "location": "United States",
       "platform": "Remotive",
-      "daysAgo": 2,
+      "daysAgo": "2 days ago",
       "url": "https://...",
       "match": {
         "score": 75,
