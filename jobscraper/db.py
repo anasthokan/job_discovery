@@ -99,11 +99,11 @@ UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, posted_at, is_active, e_verified, e_verify_name,
-  first_seen_at, last_seen_at, created_at, updated_at
+  job_type, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, 1, 'unknown', '',
-  UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -117,6 +117,7 @@ ON DUPLICATE KEY UPDATE
   url = new.url,
   description = new.description,
   posted_at = new.posted_at,
+  job_type = new.job_type,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
   updated_at = UTC_TIMESTAMP(6)
@@ -219,6 +220,12 @@ def _ensure_job_columns(cur) -> None:
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verify_name'")
     if not cur.fetchone():
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN e_verify_name VARCHAR(512) NULL")
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'job_type'")
+    if not cur.fetchone():
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} "
+            "ADD COLUMN job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime'"
+        )
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -337,6 +344,7 @@ def _row_from_item(job: dict) -> dict | None:
         "days_ago": max(days_ago, 0),
         "url": _clip(job.get("url"), 1000),
         "description": description,
+        "job_type": str(job.get("job_type") or "fulltime").strip().lower() or "fulltime",
         "posted_at": _posted_mysql(job.get("posted_at")),
     }
 
@@ -413,6 +421,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["url"],
                         row["description"],
                         row["posted_at"],
+                        row["job_type"] if row["job_type"] in {"fulltime", "parttime", "contract"} else "fulltime",
                     )
                     for row in rows
                 ]
@@ -468,6 +477,7 @@ def _job_from_row(row: dict) -> dict:
         "daysAgo": days,
         "url": row.get("url") or "",
         "description": row.get("description") or "",
+        "job_type": row.get("job_type") or "fulltime",
         "posted_at": posted,
         "e_verified": row.get("e_verified") or "unknown",
         "e_verify_name": row.get("e_verify_name"),
@@ -485,7 +495,7 @@ def load_jobs() -> list[dict]:
             cur.execute(
                 f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, description, posted_at, e_verified, e_verify_name "
+                f"days_ago, url, description, job_type, posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []

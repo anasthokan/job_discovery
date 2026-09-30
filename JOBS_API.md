@@ -12,7 +12,7 @@ Related APIs: `RESUME_API.md`, `ATS_API.md`, `CV_API.md`, `CONVERT_API.md`, `EVE
 
 ## What it does
 
-1. **Listings** — return US job listings (title, company, skills, description, location, board, apply URL)
+1. **Listings** — return US job listings (title, company, skills, description, job_type, location, board, apply URL)
 2. **Scrape** — refresh from public job boards and **upsert into MySQL** (JSON file is a backup)
 3. **Recommend** — rank those listings against candidate skills (or a resume)
 4. **Schedule** — scrape runs **twice a day** (default 08:00 and 20:00 IST) so the database stays fresh

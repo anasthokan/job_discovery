@@ -113,6 +113,16 @@ def as_list(value):
     return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
+def job_type(*values) -> str:
+    """fulltime, parttime, or contract. Missing or unknown values are fulltime."""
+    blob = " ".join(str(value or "") for value in values).lower()
+    if re.search(r"part[\s_-]?time", blob):
+        return "parttime"
+    if re.search(r"\b(contract|contractor|freelance|temporary)\b", blob):
+        return "contract"
+    return "fulltime"
+
+
 def split_company_title(raw: str) -> tuple[str, str]:
     text = (raw or "").strip()
     if ": " in text:
@@ -408,6 +418,7 @@ class JobsSpider(scrapy.Spider):
                     daysAgo=days_ago(row.get("posted_at")),
                     url=row["url"],
                     posted_at=row.get("posted_at") or "",
+                    job_type=row.get("job_type"),
                     search_text=row.get("search_text") or "",
                 ):
                     yield item
@@ -443,6 +454,7 @@ class JobsSpider(scrapy.Spider):
         description = strip_html(extra)
         if description:
             item["description"] = description[:60000]
+        item["job_type"] = job_type(fields.get("job_type"), fields.get("title"))
         yield item
 
     def parse_remoteok(self, response):
@@ -483,6 +495,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("url") or "",
                 posted_at=str(posted),
+                job_type=row.get("job_type"),
                 search_text=row.get("description") or "",
             )
 
@@ -503,6 +516,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("url") or "",
                 posted_at=str(posted),
+                job_type=row.get("jobType"),
                 search_text=row.get("jobDescription") or row.get("jobExcerpt") or "",
             )
 
@@ -548,6 +562,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("url") or "",
                 posted_at=str(posted),
+                job_type=" ".join(as_list(row.get("job_types"))),
                 search_text=row.get("description") or "",
             )
 
@@ -567,6 +582,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("applicationLink") or row.get("guid") or "",
                 posted_at=str(posted),
+                job_type=row.get("employmentType"),
                 search_text=f"{row.get('excerpt') or ''} {row.get('description') or ''}",
             )
 
@@ -658,6 +674,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("hostedUrl") or row.get("applyUrl") or "",
                 posted_at=str(posted),
+                job_type=cats.get("commitment"),
                 search_text=str((row.get("descriptionPlain") or row.get("description") or "")),
             )
 
@@ -690,6 +707,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("jobUrl") or row.get("applyUrl") or "",
                 posted_at=str(posted),
+                job_type=row.get("employmentType"),
                 search_text=row.get("descriptionPlain") or row.get("descriptionHtml") or "",
             )
 
