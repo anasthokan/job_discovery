@@ -672,11 +672,40 @@ def filter_jobs(
     return filtered
 
 
+DEFAULT_JOBS_PAGE_SIZE = 20
+
+
 def _page(jobs: list[dict], limit: int | None, offset: int) -> list[dict]:
     start = max(offset, 0)
     if limit is None:
         return jobs[start:]
     return jobs[start : start + max(limit, 0)]
+
+
+def _resolve_jobs_window(limit: int | None, offset: int, page: int | None) -> tuple[int | None, int]:
+    """Page wins over offset. A bare page uses the default page size."""
+    if page is not None:
+        size = DEFAULT_JOBS_PAGE_SIZE if limit is None else limit
+        return size, (page - 1) * size
+    return limit, max(offset, 0)
+
+
+def _pagination(total: int, limit: int | None, offset: int) -> dict:
+    page_size = total if limit is None else limit
+    if total <= 0 or page_size <= 0:
+        current = 1
+        total_pages = 0
+    else:
+        current = (offset // page_size) + 1
+        total_pages = (total + page_size - 1) // page_size
+    return {
+        "page": current,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_next": current < total_pages,
+        "has_previous": current > 1,
+    }
 
 
 def _empty_cache_hint() -> str:
@@ -1018,7 +1047,7 @@ def get_jobs(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
-    e_verified: str = Query("", description="yes, unknown, or empty for all"),
+    e_verified: str = Query("", description="true, false, or empty for all"),
     work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
     job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
     experience_level: str = Query(
@@ -1033,13 +1062,24 @@ def get_jobs(
         le=40,
         description="Keep jobs whose required years are at or below this number. Unknown years stay included.",
     ),
-    limit: int | None = Query(None, ge=1, le=200, description="Optional page size. Omit to return all matches."),
-    offset: int = Query(0, ge=0),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=200,
+        description="Page size, max 200. Omit to return every match unless page is set.",
+    ),
+    offset: int = Query(0, ge=0, description="Rows to skip. Ignored when page is set."),
+    page: int | None = Query(
+        None,
+        ge=1,
+        description="1-based page. Overrides offset. Uses limit, or 20 when limit is omitted.",
+    ),
 ):
     jobs = filter_jobs(load_jobs(), parse_keywords(keywords), state, platform, days, city)
     wanted = e_verified.strip().lower()
-    if wanted in {"yes", "unknown"}:
-        jobs = [job for job in jobs if (job.get("e_verified") or "unknown") == wanted]
+    if wanted in {"true", "false", "yes", "no", "1", "0", "unknown"}:
+        flag = wanted in {"true", "yes", "1"}
+        jobs = [job for job in jobs if job.get("e_verified") is flag]
     jobs = apply_listing_filters(
         jobs,
         work_model=work_model,
@@ -1049,13 +1089,16 @@ def get_jobs(
         clearance_required=clearance_required,
         years=years,
     )
-    page = _page(jobs, limit, offset)
+    limit, offset = _resolve_jobs_window(limit, offset, page)
+    page_rows = _page(jobs, limit, offset)
+    total = len(jobs)
     return {
-        "jobs": _with_time_ago(page),
-        "count": len(page),
-        "total": len(jobs),
+        "jobs": _with_time_ago(page_rows),
+        "count": len(page_rows),
+        "total": total,
         "limit": limit,
         "offset": offset,
+        "pagination": _pagination(total, limit, offset),
         "source": "mysql" if mysql_configured() else "json",
         **cache_meta(),
     }
@@ -1169,7 +1212,7 @@ def everify_status():
         "note": (
             "Export the employer table from the E-Verify search tool "
             "(Download → Crosstab/Data) and save as data/everify_employers.csv, "
-            "then POST /api/everify/refresh. Unmatched companies stay unknown."
+            "then POST /api/everify/refresh. Unmatched companies are e_verified false."
         ),
     }
 
@@ -1245,6 +1288,7 @@ def recommend_contract():
                     "city": "",
                     "limit": 50,
                     "offset": 0,
+                    "page": 1,
                 },
             },
             "scrape": {

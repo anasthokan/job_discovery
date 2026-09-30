@@ -178,7 +178,7 @@ curl "{BASE_URL}/api/everify/lookup?company=Microsoft"
 {
   "ok": true,
   "company": "Microsoft",
-  "e_verified": "yes",
+  "e_verified": true,
   "e_verify_name": "Microsoft Corporation",
   "e_verify_status": "Open",
   "e_verify_plus": "No",
@@ -190,6 +190,6 @@ curl "{BASE_URL}/api/everify/lookup?company=Microsoft"
 }
 ```
 
-`e_verified: "unknown"` means the name did not match. It is not a confirmed No.
+`e_verified: false` means the name did not match. It is not a confirmed No.
 
 The Checker screen should call `/api/everify/search`, not `/api/everify/lookup`.

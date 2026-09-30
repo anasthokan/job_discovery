@@ -110,7 +110,7 @@ INSERT INTO {JOBS_TABLE} (
   listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
-  %s, %s, %s, %s, %s, 1, 'unknown', '',
+  %s, %s, %s, %s, %s, 1, 'false', '',
   %s, %s, %s, %s, %s, %s,
   1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
@@ -230,7 +230,7 @@ def _ensure_job_columns(cur) -> None:
     if not cur.fetchone():
         cur.execute(
             f"ALTER TABLE {JOBS_TABLE} "
-            "ADD COLUMN e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown'"
+            "ADD COLUMN e_verified VARCHAR(16) NOT NULL DEFAULT 'false'"
         )
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verify_name'")
     if not cur.fetchone():
@@ -578,6 +578,14 @@ def _days_ago_from_iso(value: str | None, fallback: int = 0) -> int:
     return max(0, int((datetime.now(timezone.utc) - posted).total_seconds() // 86400))
 
 
+def _as_e_verified(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value or "").strip().lower() in {"true", "yes", "1"}
+
+
 def _job_from_row(row: dict) -> dict:
     posted = row.get("posted_at")
     days = _days_ago_from_iso(posted, int(row.get("days_ago") or 0))
@@ -599,7 +607,7 @@ def _job_from_row(row: dict) -> dict:
         "h1b_sponsorship": row.get("h1b_sponsorship") or "unknown",
         "clearance_required": row.get("clearance_required") or "unknown",
         "posted_at": posted,
-        "e_verified": row.get("e_verified") or "unknown",
+        "e_verified": _as_e_verified(row.get("e_verified")),
         "e_verify_name": row.get("e_verify_name"),
     }
 
@@ -846,11 +854,11 @@ def enrich_jobs_everify() -> dict:
             hit = match_company(job.get("company") or "", index)
             if hit:
                 yes += 1
-                status = "yes"
+                status = "true"
                 name = hit.get("employer") or hit.get("dba")
             else:
                 unknown += 1
-                status = "unknown"
+                status = "false"
                 name = ""
             cur.execute(
                 f"UPDATE {JOBS_TABLE} SET e_verified = %s, e_verify_name = %s WHERE id = %s",

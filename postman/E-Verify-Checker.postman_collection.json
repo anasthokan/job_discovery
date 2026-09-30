@@ -194,7 +194,7 @@
             "method": "GET",
             "header": [],
             "url": "{{baseUrl}}/api/everify/lookup?company=Microsoft",
-            "description": "Optional. The Checker screen should call /api/everify/search, not this.\n\ne_verified is yes or unknown. unknown is not a confirmed No."
+            "description": "Optional. The Checker screen should call /api/everify/search, not this.\n\ne_verified is true or false. false is not a confirmed No."
           },
           "response": []
         }

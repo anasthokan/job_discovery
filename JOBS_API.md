@@ -39,7 +39,7 @@ Scrape can take **several minutes** on a full run. Recommend without `refresh` i
 ## List cached jobs
 
 ```bash
-curl "{BASE_URL}/api/jobs?keywords=python,fastapi&state=All&platform=All&days=7&limit=20"
+curl "{BASE_URL}/api/jobs?keywords=python,fastapi&state=All&platform=All&days=7&limit=20&page=1"
 ```
 
 JavaScript:
@@ -52,12 +52,12 @@ const params = new URLSearchParams({
   days: "30",
   city: "",
   limit: "20",
-  offset: "0",
+  page: "1",
 });
 const res = await fetch(`${BASE_URL}/api/jobs?${params}`);
 const data = await res.json();
 if (!res.ok) throw new Error(data.detail || "Jobs list failed");
-// data.jobs, data.count, data.total
+// data.jobs, data.pagination.page, data.pagination.total_pages, data.pagination.has_next
 ```
 
 Query flags:
@@ -75,9 +75,12 @@ Query flags:
 | `h1b_sponsorship` | `""` | `yes` or `no`. `unknown` means the posting never says |
 | `clearance_required` | `""` | `yes` or `no` |
 | `years` | omit | Candidate years. Drops jobs that require more. Jobs with no stated years stay |
-| `e_verified` | `""` | `yes` or `unknown` |
-| `limit` | omit | Max **200**. Omit to return every match |
-| `offset` | `0` | Skip this many matches |
+| `e_verified` | `""` | `true` or `false` |
+| `limit` | omit | Page size, max **200**. Omit to return every match, unless `page` is set |
+| `page` | omit | 1-based page. Overrides `offset`. With no `limit`, page size is **20** |
+| `offset` | `0` | Skip this many matches. Ignored when `page` is set |
+
+Next page: raise `page` by 1, or add `limit` to `offset`. `pagination.has_next` is false on the last page.
 
 ## Refresh listings (scrape)
 
@@ -103,13 +106,13 @@ Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recomm
 
 ## E-Verify flag
 
-Each listing can include `e_verified`: `yes` or `unknown` (company name matched against the public [E-Verify Employer Search](https://www.e-verify.gov/e-verify-employer-search) list). `unknown` is not a confirmed No — names often differ (legal vs DBA).
+Each listing includes `e_verified` as a boolean (company name matched against the public [E-Verify Employer Search](https://www.e-verify.gov/e-verify-employer-search) list). `true` means the name matched an enrolled employer. `false` means it did not. Names often differ (legal vs DBA), so `false` is not proof the employer is unenrolled.
 
 Export the employer table from that page (Download → Crosstab/Data), save as `data/everify_employers.csv`, then:
 
 ```bash
 curl -X POST "{BASE_URL}/api/everify/refresh"
-curl "{BASE_URL}/api/jobs?e_verified=yes&limit=20"
+curl "{BASE_URL}/api/jobs?e_verified=true&limit=20"
 curl "{BASE_URL}/api/everify/lookup?company=Microsoft"
 ```
 
@@ -219,7 +222,7 @@ HTTP `200`:
       "h1b_sponsorship": "yes",
       "clearance_required": "unknown",
       "posted_at": "2026-09-15",
-      "e_verified": "unknown",
+      "e_verified": false,
       "e_verify_name": null
     }
   ],
@@ -227,10 +230,20 @@ HTTP `200`:
   "total": 1,
   "limit": 20,
   "offset": 0,
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 1,
+    "total_pages": 1,
+    "has_next": false,
+    "has_previous": false
+  },
   "scraped_at": "2026-09-17T05:00:00+00:00",
   "age_seconds": 120
 }
 ```
+
+`count` is the jobs in this page. `total` is every match for the filters. `pagination.page` starts at 1. Request `page=2` (or `offset=20` with the same `limit`) for the next page.
 
 Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 

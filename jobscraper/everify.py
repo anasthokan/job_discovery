@@ -314,7 +314,7 @@ def lookup(company: str) -> dict:
     row = match_company(company, everify_index())
     if not row:
         return {
-            "e_verified": "unknown",
+            "e_verified": False,
             "e_verify_name": None,
             "e_verify_status": None,
             "e_verify_plus": None,
@@ -324,7 +324,7 @@ def lookup(company: str) -> dict:
         }
     result = employer_result(row)
     return {
-        "e_verified": "yes" if result["enrolled"] else "unknown",
+        "e_verified": bool(result["enrolled"]),
         "e_verify_name": result["employer"],
         "e_verify_status": result["account_status"],
         "e_verify_plus": row.get("everify_plus") or None,
