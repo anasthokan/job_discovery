@@ -10,6 +10,8 @@ Interactive try-out: [http://74.208.184.175:517/docs](http://74.208.184.175:517/
 
 CORS is open (`allow_origins=["*"]`).
 
+Postman: import `postman/E-Verify-Checker.postman_collection.json`. Collection variable `baseUrl` is already the production URL. Body stays **none**.
+
 The Search button calls one endpoint. Dropdown values come from `/api/everify/filters`.
 
 | UI | Control | API |

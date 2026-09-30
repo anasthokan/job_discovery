@@ -22,7 +22,10 @@ load_dotenv(_ROOT / ".env")
 log = logging.getLogger("jobscraper.db")
 
 _LOCK = threading.Lock()
-_CONN = None
+# One MySQL connection per thread. A single shared connection is closed by one
+# request while another request is still reading, which crashes uvicorn and
+# IIS then returns 502.
+_local = threading.local()
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _EVERIFY_INDEX: dict | None = None
 
@@ -170,30 +173,26 @@ def _ensure_database(cfg: dict) -> None:
 
 
 def get_conn():
-    global _CONN
     cfg = mysql_config()
     if not cfg:
         return None
-    with _LOCK:
-        if _CONN is None or not getattr(_CONN, "open", False):
-            _CONN = _connect(cfg)
-        else:
-            try:
-                _CONN.ping(reconnect=True)
-            except Exception:
-                _CONN = _connect(cfg)
-        return _CONN
+    conn = getattr(_local, "conn", None)
+    if conn is not None and getattr(conn, "open", False):
+        return conn
+    conn = _connect(cfg)
+    _local.conn = conn
+    return conn
 
 
 def close_conn() -> None:
-    global _CONN
-    with _LOCK:
-        if _CONN is not None:
-            try:
-                _CONN.close()
-            except Exception:
-                pass
-            _CONN = None
+    conn = getattr(_local, "conn", None)
+    _local.conn = None
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 
 def _ensure_job_columns(cur) -> None:
