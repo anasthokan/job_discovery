@@ -1,25 +1,30 @@
 USE ezyjob;
 
 CREATE TABLE IF NOT EXISTS jobs (
-  id VARCHAR(255) NOT NULL,
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  public_id CHAR(32) NOT NULL,
   title VARCHAR(512) NOT NULL,
-  company VARCHAR(512) NOT NULL,
-  skills JSON NULL,
-  state VARCHAR(128) NULL,
-  location VARCHAR(512) NULL,
-  platform VARCHAR(128) NULL,
-  days_ago INT NOT NULL DEFAULT 0,
-  url VARCHAR(512) NULL,
-  posted_at VARCHAR(64) NULL,
-  e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown',
-  e_verify_name VARCHAR(512) NULL,
-  first_seen_at DATETIME NOT NULL,
-  last_seen_at DATETIME NOT NULL,
+  location VARCHAR(512) NOT NULL,
+  description LONGTEXT NOT NULL,
+  posted_at DATETIME(6) NULL,
+  is_active TINYINT(1) NOT NULL,
+  company_ref_id BIGINT NULL,
+  platform VARCHAR(120) NOT NULL,
+  days_ago INT UNSIGNED NULL,
+  company VARCHAR(255) NULL,
+  e_verified VARCHAR(64) NOT NULL,
+  e_verify_name VARCHAR(255) NOT NULL,
+  first_seen_at DATETIME(6) NULL,
+  last_seen_at DATETIME(6) NULL,
+  skills JSON NOT NULL,
+  source_id VARCHAR(255) NULL,
+  state VARCHAR(255) NOT NULL,
+  url VARCHAR(1000) NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_jd_jobs_url (url),
-  KEY idx_jd_jobs_platform (platform),
-  KEY idx_jd_jobs_last_seen (last_seen_at),
-  KEY idx_jd_jobs_everify (e_verified)
+  UNIQUE KEY uk_jobs_public_id (public_id),
+  UNIQUE KEY uk_jobs_source_id (source_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS job_discovery_scrape_runs (

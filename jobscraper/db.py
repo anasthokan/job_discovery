@@ -6,6 +6,7 @@ Credentials come from environment / `.env`:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -36,25 +37,30 @@ EVERIFY_TABLE = "job_discovery_everify_employers"
 
 CREATE_JOBS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
-  id VARCHAR(255) NOT NULL,
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  public_id CHAR(32) NOT NULL,
   title VARCHAR(512) NOT NULL,
-  company VARCHAR(512) NOT NULL,
-  skills JSON NULL,
-  state VARCHAR(128) NULL,
-  location VARCHAR(512) NULL,
-  platform VARCHAR(128) NULL,
-  days_ago INT NOT NULL DEFAULT 0,
-  url VARCHAR(512) NULL,
-  posted_at VARCHAR(64) NULL,
-  e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown',
-  e_verify_name VARCHAR(512) NULL,
-  first_seen_at DATETIME NOT NULL,
-  last_seen_at DATETIME NOT NULL,
+  location VARCHAR(512) NOT NULL,
+  description LONGTEXT NOT NULL,
+  posted_at DATETIME(6) NULL,
+  is_active TINYINT(1) NOT NULL,
+  company_ref_id BIGINT NULL,
+  platform VARCHAR(120) NOT NULL,
+  days_ago INT UNSIGNED NULL,
+  company VARCHAR(255) NULL,
+  e_verified VARCHAR(64) NOT NULL,
+  e_verify_name VARCHAR(255) NOT NULL,
+  first_seen_at DATETIME(6) NULL,
+  last_seen_at DATETIME(6) NULL,
+  skills JSON NOT NULL,
+  source_id VARCHAR(255) NULL,
+  state VARCHAR(255) NOT NULL,
+  url VARCHAR(1000) NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_jd_jobs_url (url),
-  KEY idx_jd_jobs_platform (platform),
-  KEY idx_jd_jobs_last_seen (last_seen_at),
-  KEY idx_jd_jobs_everify (e_verified)
+  UNIQUE KEY uk_jobs_public_id (public_id),
+  UNIQUE KEY uk_jobs_source_id (source_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -88,24 +94,32 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
+# ezyjob.jobs.id is a bigint autoincrement. The scraper id is stored in source_id.
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
-  id, title, company, skills, state, location, platform, days_ago, url, posted_at,
-  first_seen_at, last_seen_at
+  public_id, source_id, title, company, company_ref_id, skills, state, location,
+  platform, days_ago, url, description, posted_at, is_active, e_verified, e_verify_name,
+  first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
-  %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, UTC_TIMESTAMP(), UTC_TIMESTAMP()
+  %s, %s, %s, %s, %s, %s, %s, %s,
+  %s, %s, %s, %s, %s, 1, 'unknown', '',
+  UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
   company = new.company,
+  company_ref_id = COALESCE(new.company_ref_id, {JOBS_TABLE}.company_ref_id),
   skills = new.skills,
   state = new.state,
   location = new.location,
   platform = new.platform,
   days_ago = new.days_ago,
   url = new.url,
+  description = new.description,
   posted_at = new.posted_at,
-  last_seen_at = UTC_TIMESTAMP()
+  is_active = 1,
+  last_seen_at = UTC_TIMESTAMP(6),
+  updated_at = UTC_TIMESTAMP(6)
 """
 
 
@@ -252,31 +266,110 @@ def _as_skills_json(value) -> str:
     return json.dumps(items, ensure_ascii=False)
 
 
-def _row_from_item(job: dict) -> tuple | None:
-    job_id = str(job.get("id") or "").strip()
-    title = str(job.get("title") or "").strip()
-    company = str(job.get("company") or "").strip()
-    if not job_id or not title or not company:
+def _clip(value, limit: int, default: str = "") -> str:
+    text = str(value or "").strip()
+    return (text or default)[:limit]
+
+
+def _public_id(value: str) -> str:
+    return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+
+def _company_key(name: str) -> str:
+    return re.sub(r"\s+", " ", name.strip().lower())[:255]
+
+
+def _posted_mysql(value) -> str | None:
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    text = str(value or "").strip()
+    if not text or text.lower() in {"none", "nat", "nan"}:
         return None
-    url = str(job.get("url") or "").strip() or None
-    posted = job.get("posted_at")
-    posted_at = str(posted).strip() if posted not in (None, "") else None
+    if text.isdigit():
+        try:
+            stamp = int(text)
+            if stamp > 10_000_000_000:
+                stamp //= 1000
+            return datetime.fromtimestamp(stamp, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return None
+    cleaned = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError:
+        if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+            return text[:10] + " 00:00:00"
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _row_from_item(job: dict) -> dict | None:
+    source_id = _clip(job.get("id"), 255)
+    title = _clip(job.get("title"), 512)
+    company = _clip(job.get("company"), 255)
+    if not source_id or not title or not company:
+        return None
+    skills = _as_skills_json(job.get("skills"))
+    try:
+        skill_names = json.loads(skills)
+    except json.JSONDecodeError:
+        skill_names = []
+    description = ", ".join(skill_names) if skill_names else title
     try:
         days_ago = int(job.get("daysAgo") or 0)
     except (TypeError, ValueError):
         days_ago = 0
-    return (
-        job_id[:255],
-        title[:512],
-        company[:512],
-        _as_skills_json(job.get("skills")),
-        (str(job.get("state") or "").strip() or None),
-        (str(job.get("location") or "").strip() or None),
-        (str(job.get("platform") or "").strip() or None),
-        max(days_ago, 0),
-        url[:512] if url else None,
-        posted_at[:64] if posted_at else None,
-    )
+    return {
+        "public_id": _public_id(source_id),
+        "source_id": source_id,
+        "title": title,
+        "company": company,
+        "company_key": _company_key(company),
+        "skills": skills,
+        "state": _clip(job.get("state"), 255),
+        "location": _clip(job.get("location"), 512, "United States"),
+        "platform": _clip(job.get("platform"), 120, "Unknown"),
+        "days_ago": max(days_ago, 0),
+        "url": _clip(job.get("url"), 1000),
+        "description": description,
+        "posted_at": _posted_mysql(job.get("posted_at")),
+    }
+
+
+def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
+    """Map normalized company name -> companies.id, inserting a row when missing."""
+    found: dict[str, int] = {}
+    for key, name in names.items():
+        if not key or key in found:
+            continue
+        cur.execute(
+            "SELECT id FROM companies WHERE normalized_name = %s OR LOWER(name) = %s LIMIT 1",
+            (key, key),
+        )
+        row = cur.fetchone()
+        if row:
+            found[key] = int(row["id"])
+            continue
+        cur.execute(
+            """
+            INSERT INTO companies (
+              public_id, name, normalized_name, website, h1b_sponsor,
+              sponsorship_notes, logo_url, created_at, updated_at
+            ) VALUES (%s, %s, %s, '', 0, '', '', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+            ON DUPLICATE KEY UPDATE updated_at = companies.updated_at
+            """,
+            (_public_id("company:" + key), name, key),
+        )
+        cur.execute(
+            "SELECT id FROM companies WHERE public_id = %s OR normalized_name = %s LIMIT 1",
+            (_public_id("company:" + key), key),
+        )
+        row = cur.fetchone()
+        if row:
+            found[key] = int(row["id"])
+    return found
 
 
 def upsert_jobs(jobs: list[dict]) -> int:
@@ -287,11 +380,10 @@ def upsert_jobs(jobs: list[dict]) -> int:
         return 0
     unique = {}
     for row in rows:
-        unique[row[0]] = row
+        unique[row["source_id"]] = row
     by_url = {}
     for row in unique.values():
-        key = row[8] or f"id:{row[0]}"
-        by_url[key] = row
+        by_url[row["url"] or f"id:{row['source_id']}"] = row
     rows = list(by_url.values())
     conn = get_conn()
     if conn is None:
@@ -299,7 +391,29 @@ def upsert_jobs(jobs: list[dict]) -> int:
     try:
         with _LOCK:
             with conn.cursor() as cur:
-                cur.executemany(UPSERT_SQL, rows)
+                company_ids = _company_ids(
+                    cur,
+                    {row["company_key"]: row["company"] for row in rows if row["company_key"]},
+                )
+                payload = [
+                    (
+                        row["public_id"],
+                        row["source_id"],
+                        row["title"],
+                        row["company"],
+                        company_ids.get(row["company_key"]),
+                        row["skills"],
+                        row["state"],
+                        row["location"],
+                        row["platform"],
+                        row["days_ago"],
+                        row["url"],
+                        row["description"],
+                        row["posted_at"],
+                    )
+                    for row in rows
+                ]
+                cur.executemany(UPSERT_SQL, payload)
         return len(rows)
     except Exception:
         close_conn()
@@ -365,7 +479,8 @@ def load_jobs() -> list[dict]:
             return []
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, title, company, skills, state, location, platform, "
+                f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
+                f"title, company, skills, state, location, platform, "
                 f"days_ago, url, posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
@@ -601,10 +716,10 @@ def enrich_jobs_everify() -> dict:
             else:
                 unknown += 1
                 status = "unknown"
-                name = None
+                name = ""
             cur.execute(
                 f"UPDATE {JOBS_TABLE} SET e_verified = %s, e_verify_name = %s WHERE id = %s",
-                (status, name, job.get("id")),
+                (status, (name or "")[:255], job.get("id")),
             )
     return {"updated": len(jobs), "yes": yes, "unknown": unknown, "employers": everify_count()}
 
