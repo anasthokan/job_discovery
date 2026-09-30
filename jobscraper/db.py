@@ -467,6 +467,7 @@ def _job_from_row(row: dict) -> dict:
         "platform": row.get("platform") or "",
         "daysAgo": days,
         "url": row.get("url") or "",
+        "description": row.get("description") or "",
         "posted_at": posted,
         "e_verified": row.get("e_verified") or "unknown",
         "e_verify_name": row.get("e_verify_name"),
@@ -484,7 +485,7 @@ def load_jobs() -> list[dict]:
             cur.execute(
                 f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, posted_at, e_verified, e_verify_name "
+                f"days_ago, url, description, posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []
