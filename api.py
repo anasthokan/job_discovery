@@ -18,7 +18,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from jobscraper.ats_score import AtsScoreError, score_resume
@@ -64,6 +64,7 @@ INDEX_FILE = ROOT / "index.html"
 DASHBOARD_FILE = ROOT / "dashboard.html"
 SCRAPE_LOCK = threading.Lock()
 SCRAPE_TIMEOUT = 720
+_LAST_SCRAPE: dict = {"ok": None, "error": None, "count": None, "db_total": None}
 log = logging.getLogger("job-discovery")
 USAJOBS_CACHE_TTL = 3600
 USAJOBS_CODELISTS = {
@@ -968,26 +969,49 @@ def scrape_jobs(
     days: int = Query(30),
     city: str = Query(""),
 ):
+    """Start a scrape and return immediately. IIS closes long requests with 502."""
     if not SCRAPE_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
+    thread = threading.Thread(
+        target=_scrape_background,
+        args=(keywords, state, platform, city),
+        name="job-scrape",
+        daemon=True,
+    )
+    thread.start()
+    return JSONResponse(
+        status_code=202,
+        content={
+            "ok": True,
+            "started": True,
+            "running": True,
+            "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check mysql.jobs.",
+        },
+    )
+
+
+def _scrape_background(keywords: str, state: str, platform: str, city: str) -> None:
+    global _LAST_SCRAPE
     try:
         run_spider(keywords, state, platform, city)
-    except subprocess.TimeoutExpired as exc:
-        raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
+        jobs = [
+            job
+            for job in load_jobs_json()
+            if is_usa_job(job.get("state") or "", job.get("location") or "")
+        ]
+        _LAST_SCRAPE = {
+            "ok": True,
+            "error": None,
+            "count": len(jobs),
+            "db_total": mysql_job_count() if mysql_configured() else len(jobs),
+        }
+        log.info("Scrape saved %s jobs (db_total=%s)", len(jobs), _LAST_SCRAPE["db_total"])
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        _LAST_SCRAPE = {"ok": False, "error": str(detail)[:500], "count": 0, "db_total": None}
+        log.exception("Background scrape failed")
     finally:
         SCRAPE_LOCK.release()
-    jobs = [
-        job
-        for job in load_jobs_json()
-        if is_usa_job(job.get("state") or "", job.get("location") or "")
-    ]
-    return {
-        "jobs": jobs,
-        "count": len(jobs),
-        "saved_to": "mysql" if mysql_configured() else "json",
-        "db_total": mysql_job_count() if mysql_configured() else len(jobs),
-        **cache_meta(),
-    }
 
 
 @app.get("/api/scrape/status")
@@ -995,6 +1019,7 @@ def scrape_status():
     return {
         "ok": True,
         "running": SCRAPE_LOCK.locked(),
+        "last_scrape": _LAST_SCRAPE,
         "mysql": mysql_health(),
         "schedule": {
             "enabled": _truthy("SCRAPE_SCHEDULE_ENABLED", "true"),

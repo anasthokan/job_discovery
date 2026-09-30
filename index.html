@@ -621,6 +621,16 @@
       searchBtn.textContent = isLoading ? "Scraping…" : "Search Jobs";
     }
 
+    async function waitForScrape() {
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        const res = await fetch("/api/scrape/status");
+        const data = await res.json();
+        if (!data.running) return data.last_scrape || { ok: false, error: "Scrape finished with no status" };
+      }
+      return { ok: false, error: "Scrape is still running. Check /api/scrape/status." };
+    }
+
     async function searchJobs() {
       const pending = keywordInput.value.trim();
       if (pending) addKeyword(pending);
@@ -631,6 +641,19 @@
         const data = await res.json();
         if (!res.ok) {
           throw new Error(data.detail || "Scrape failed");
+        }
+        if (data.started) {
+          setStatus("Scrape is running. This can take several minutes.");
+          const done = await waitForScrape();
+          if (!done.ok) throw new Error(done.error || "Scrape failed");
+          const listed = await fetch(`/api/jobs?${queryParams()}`);
+          const payload = await listed.json();
+          if (!listed.ok) throw new Error(payload.detail || "Jobs list failed");
+          jobs = payload.jobs || [];
+          currentPage = 1;
+          applyFilters(false);
+          setStatus(`Saved ${done.db_total ?? payload.total} jobs. Showing this filter.`);
+          return;
         }
         jobs = data.jobs || [];
         currentPage = 1;

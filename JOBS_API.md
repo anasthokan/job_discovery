@@ -78,7 +78,13 @@ Query flags:
 curl -X POST "{BASE_URL}/api/scrape?keywords=&state=All&platform=All&days=7"
 ```
 
-`409` if another scrape is already running. `504` if it exceeds 12 minutes.
+The response is immediate (`202`, `"started": true`). The scrape keeps running after that, so the IIS proxy does not return 502 while boards are still loading. Poll until `running` is false:
+
+```bash
+curl "{BASE_URL}/api/scrape/status"
+```
+
+`last_scrape.db_total` is the number of rows in `ezyjob.jobs`. `409` if another scrape is already running.
 
 This run is upserted into MySQL database `ezyjob`, table `jobs`, when `.env` has `MYSQL_DATABASE=ezyjob`. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice.
 
