@@ -69,6 +69,13 @@ Query flags:
 | `platform` | `All` | Exact board name from `/api/filters` |
 | `days` | `30` | `1`, `3`, `7`, or `30` |
 | `city` | `""` | Optional city substring |
+| `work_model` | `""` | Comma-separated: `remote`, `hybrid`, `onsite` |
+| `job_type` | `""` | Comma-separated: `fulltime`, `contract`, `parttime`, `internship` |
+| `experience_level` | `""` | Comma-separated: `Intern/New Grad`, `Entry Level`, `Mid Level`, `Senior Level`, `Lead/Staff`, `Director/Executive` |
+| `h1b_sponsorship` | `""` | `yes` or `no`. `unknown` means the posting never says |
+| `clearance_required` | `""` | `yes` or `no` |
+| `years` | omit | Candidate years. Drops jobs that require more. Jobs with no stated years stay |
+| `e_verified` | `""` | `yes` or `unknown` |
 | `limit` | omit | Max **200**. Omit to return every match |
 | `offset` | `0` | Skip this many matches |
 
@@ -204,7 +211,16 @@ HTTP `200`:
       "platform": "Remotive",
       "daysAgo": 2,
       "url": "https://...",
-      "posted_at": "2026-09-15"
+      "description": "Senior backend role. 5+ years of experience. Visa sponsorship available.",
+      "job_type": "fulltime",
+      "work_model": "remote",
+      "experience_level": "Senior Level",
+      "years_experience": 5,
+      "h1b_sponsorship": "yes",
+      "clearance_required": "unknown",
+      "posted_at": "2026-09-15",
+      "e_verified": "unknown",
+      "e_verify_name": null
     }
   ],
   "count": 1,
@@ -217,6 +233,8 @@ HTTP `200`:
 ```
 
 Missing fields may be `null` or `[]`. `url` is the apply / posting link.
+
+`work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, and `clearance_required` are saved on each row. They are read from the posting title, location, and description when the board does not send them. `unknown` means the posting never said. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
 
 ## Success response (recommend)
 

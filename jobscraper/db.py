@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
+  job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
+  work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  experience_level VARCHAR(32) NOT NULL DEFAULT 'unknown',
+  years_experience SMALLINT NULL,
+  h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)
@@ -99,11 +106,13 @@ UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, posted_at, is_active, e_verified, e_verify_name,
-  job_type, first_seen_at, last_seen_at, created_at, updated_at
+  job_type, work_model, experience_level, years_experience, h1b_sponsorship, clearance_required,
+  listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, 1, 'unknown', '',
-  %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, %s, %s, %s, %s, %s,
+  1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -118,6 +127,12 @@ ON DUPLICATE KEY UPDATE
   description = new.description,
   posted_at = new.posted_at,
   job_type = new.job_type,
+  work_model = new.work_model,
+  experience_level = new.experience_level,
+  years_experience = new.years_experience,
+  h1b_sponsorship = new.h1b_sponsorship,
+  clearance_required = new.clearance_required,
+  listing_inferred = 1,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
   updated_at = UTC_TIMESTAMP(6)
@@ -226,6 +241,17 @@ def _ensure_job_columns(cur) -> None:
             f"ALTER TABLE {JOBS_TABLE} "
             "ADD COLUMN job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime'"
         )
+    for name, ddl in (
+        ("work_model", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+        ("experience_level", "VARCHAR(32) NOT NULL DEFAULT 'unknown'"),
+        ("years_experience", "SMALLINT NULL"),
+        ("h1b_sponsorship", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+        ("clearance_required", "VARCHAR(16) NOT NULL DEFAULT 'unknown'"),
+        ("listing_inferred", "TINYINT(1) NOT NULL DEFAULT 0"),
+    ):
+        cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
+        if not cur.fetchone():
+            cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -248,6 +274,7 @@ def init_db() -> bool:
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_EVERIFY_SQL)
             _ensure_job_columns(cur)
+        backfill_listing_fields()
         _EVERIFY_INDEX = None
         from jobscraper.everify import load_rows_from_csv
 
@@ -261,6 +288,59 @@ def init_db() -> bool:
         close_conn()
         log.exception("MySQL init failed")
         return False
+
+
+def backfill_listing_fields() -> int:
+    """Fill work model, experience, H1B, and clearance on rows saved before those columns existed."""
+    if not mysql_configured():
+        return 0
+    from jobscraper.job_fields import infer_listing_fields
+
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        with _LOCK:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id, title, location, state, description, job_type "
+                    f"FROM {JOBS_TABLE} WHERE listing_inferred = 0"
+                )
+                rows = cur.fetchall() or []
+                if not rows:
+                    return 0
+                payload = []
+                for row in rows:
+                    fields = infer_listing_fields(
+                        title=row.get("title") or "",
+                        location=row.get("location") or "",
+                        state=row.get("state") or "",
+                        description=row.get("description") or "",
+                        job_type=row.get("job_type") or "",
+                    )
+                    payload.append(
+                        (
+                            fields["work_model"],
+                            str(fields["experience_level"] or "unknown")[:32],
+                            fields["years_experience"],
+                            fields["h1b_sponsorship"],
+                            fields["clearance_required"],
+                            fields["job_type"],
+                            row["id"],
+                        )
+                    )
+                cur.executemany(
+                    f"UPDATE {JOBS_TABLE} SET work_model=%s, experience_level=%s, "
+                    f"years_experience=%s, h1b_sponsorship=%s, clearance_required=%s, "
+                    f"job_type=%s, listing_inferred=1 WHERE id=%s",
+                    payload,
+                )
+        log.info("Backfilled listing fields on %s jobs", len(payload))
+        return len(payload)
+    except Exception:
+        close_conn()
+        log.exception("Listing field backfill failed")
+        return 0
 
 
 def _as_skills_json(value) -> str:
@@ -312,6 +392,36 @@ def _posted_mysql(value) -> str | None:
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _listing_fields(job: dict, description: str) -> dict:
+    from jobscraper.job_fields import infer_listing_fields
+
+    fields = infer_listing_fields(
+        title=str(job.get("title") or ""),
+        location=str(job.get("location") or ""),
+        state=str(job.get("state") or ""),
+        description=description,
+        job_type=job.get("job_type") or "",
+    )
+    level = str(fields["experience_level"] or "unknown")
+    return {
+        "job_type": fields["job_type"],
+        "work_model": str(fields["work_model"] or "unknown")[:16],
+        "experience_level": level[:32],
+        "years_experience": fields["years_experience"],
+        "h1b_sponsorship": str(fields["h1b_sponsorship"] or "unknown")[:16],
+        "clearance_required": str(fields["clearance_required"] or "unknown")[:16],
+    }
+
+
+def _years_value(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _row_from_item(job: dict) -> dict | None:
     source_id = _clip(job.get("id"), 255)
     title = _clip(job.get("title"), 512)
@@ -344,8 +454,8 @@ def _row_from_item(job: dict) -> dict | None:
         "days_ago": max(days_ago, 0),
         "url": _clip(job.get("url"), 1000),
         "description": description,
-        "job_type": str(job.get("job_type") or "fulltime").strip().lower() or "fulltime",
         "posted_at": _posted_mysql(job.get("posted_at")),
+        **_listing_fields(job, description),
     }
 
 
@@ -421,7 +531,12 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["url"],
                         row["description"],
                         row["posted_at"],
-                        row["job_type"] if row["job_type"] in {"fulltime", "parttime", "contract"} else "fulltime",
+                        row["job_type"] if row["job_type"] in {"fulltime", "parttime", "contract", "internship"} else "fulltime",
+                        row["work_model"],
+                        row["experience_level"],
+                        row["years_experience"],
+                        row["h1b_sponsorship"],
+                        row["clearance_required"],
                     )
                     for row in rows
                 ]
@@ -478,6 +593,11 @@ def _job_from_row(row: dict) -> dict:
         "url": row.get("url") or "",
         "description": row.get("description") or "",
         "job_type": row.get("job_type") or "fulltime",
+        "work_model": row.get("work_model") or "unknown",
+        "experience_level": row.get("experience_level") or "unknown",
+        "years_experience": _years_value(row.get("years_experience")),
+        "h1b_sponsorship": row.get("h1b_sponsorship") or "unknown",
+        "clearance_required": row.get("clearance_required") or "unknown",
         "posted_at": posted,
         "e_verified": row.get("e_verified") or "unknown",
         "e_verify_name": row.get("e_verify_name"),
@@ -495,7 +615,8 @@ def load_jobs() -> list[dict]:
             cur.execute(
                 f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, description, job_type, posted_at, e_verified, e_verify_name "
+                f"days_ago, url, description, job_type, work_model, experience_level, "
+                f"years_experience, h1b_sponsorship, clearance_required, posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []

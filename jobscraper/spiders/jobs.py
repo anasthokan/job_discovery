@@ -29,6 +29,7 @@ from jobscraper.boards import (
     WWR_FEEDS,
 )
 from jobscraper.items import JobItem
+from jobscraper.job_fields import infer_listing_fields
 from jobscraper.jobspy_source import scrape as scrape_jobspy
 from jobscraper.jobspy_source import sites_for_platform
 from jobscraper.locations import is_usa_job, muse_location, parse_state
@@ -111,16 +112,6 @@ def as_list(value):
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
     return [part.strip() for part in str(value).split(",") if part.strip()]
-
-
-def job_type(*values) -> str:
-    """fulltime, parttime, or contract. Missing or unknown values are fulltime."""
-    blob = " ".join(str(value or "") for value in values).lower()
-    if re.search(r"part[\s_-]?time", blob):
-        return "parttime"
-    if re.search(r"\b(contract|contractor|freelance|temporary)\b", blob):
-        return "contract"
-    return "fulltime"
 
 
 def split_company_title(raw: str) -> tuple[str, str]:
@@ -454,7 +445,15 @@ class JobsSpider(scrapy.Spider):
         description = strip_html(extra)
         if description:
             item["description"] = description[:60000]
-        item["job_type"] = job_type(fields.get("job_type"), fields.get("title"))
+        inferred = infer_listing_fields(
+            title=fields.get("title") or "",
+            location=fields.get("location") or "",
+            state=fields.get("state") or "",
+            description=description,
+            job_type=fields.get("job_type") or "",
+        )
+        for key, value in inferred.items():
+            item[key] = value
         yield item
 
     def parse_remoteok(self, response):

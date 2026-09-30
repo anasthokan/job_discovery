@@ -14,3 +14,8 @@ class JobItem(scrapy.Item):
     posted_at = scrapy.Field()
     description = scrapy.Field()
     job_type = scrapy.Field()
+    work_model = scrapy.Field()
+    experience_level = scrapy.Field()
+    years_experience = scrapy.Field()
+    h1b_sponsorship = scrapy.Field()
+    clearance_required = scrapy.Field()

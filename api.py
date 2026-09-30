@@ -31,6 +31,12 @@ from jobscraper.document_convert import (
     preview_text_from_docx,
 )
 from jobscraper.jd_to_cv import JobToCvError, build_cv_from_job
+from jobscraper.job_fields import (
+    EXPERIENCE_LEVELS,
+    WORK_MODELS,
+    apply_listing_filters,
+    infer_listing_fields,
+)
 from jobscraper.locations import DROPDOWN_STATES, is_usa_job, matches_city_filter, matches_state_filter
 from jobscraper.recommend import (
     DEFAULT_LIMIT,
@@ -393,7 +399,19 @@ def load_jobs() -> list[dict]:
         rows = load_jobs_mysql()
         if rows:
             return rows
-    return load_jobs_json()
+    annotated = []
+    for job in load_jobs_json():
+        fields = infer_listing_fields(
+            title=job.get("title") or "",
+            location=job.get("location") or "",
+            state=job.get("state") or "",
+            description=job.get("description") or job.get("search_text") or "",
+            job_type=job.get("job_type") or "",
+        )
+        row = dict(job)
+        row.update(fields)
+        annotated.append(row)
+    return annotated
 
 
 def cache_meta() -> dict:
@@ -909,6 +927,16 @@ def filters():
             "USAJobs",
         ],
         "days": [1, 3, 7, 30],
+        "work_models": list(WORK_MODELS),
+        "job_types": [
+            {"value": "fulltime", "label": "Full-time"},
+            {"value": "contract", "label": "Contract"},
+            {"value": "parttime", "label": "Part-time"},
+            {"value": "internship", "label": "Internship"},
+        ],
+        "experience_levels": list(EXPERIENCE_LEVELS),
+        "h1b_sponsorship": ["yes", "no"],
+        "clearance_required": ["yes", "no"],
     }
 
 
@@ -920,6 +948,20 @@ def get_jobs(
     days: int = Query(30),
     city: str = Query(""),
     e_verified: str = Query("", description="yes, unknown, or empty for all"),
+    work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
+    job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
+    experience_level: str = Query(
+        "",
+        description="Comma-separated: Intern/New Grad, Entry Level, Mid Level, Senior Level, Lead/Staff, Director/Executive",
+    ),
+    h1b_sponsorship: str = Query("", description="yes or no"),
+    clearance_required: str = Query("", description="yes or no"),
+    years: int | None = Query(
+        None,
+        ge=0,
+        le=40,
+        description="Keep jobs whose required years are at or below this number. Unknown years stay included.",
+    ),
     limit: int | None = Query(None, ge=1, le=200, description="Optional page size. Omit to return all matches."),
     offset: int = Query(0, ge=0),
 ):
@@ -927,6 +969,15 @@ def get_jobs(
     wanted = e_verified.strip().lower()
     if wanted in {"yes", "unknown"}:
         jobs = [job for job in jobs if (job.get("e_verified") or "unknown") == wanted]
+    jobs = apply_listing_filters(
+        jobs,
+        work_model=work_model,
+        job_type=job_type,
+        experience_level=experience_level,
+        h1b_sponsorship=h1b_sponsorship,
+        clearance_required=clearance_required,
+        years=years,
+    )
     page = _page(jobs, limit, offset)
     return {
         "jobs": page,

@@ -22,6 +22,13 @@ CREATE TABLE IF NOT EXISTS jobs (
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
+  job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
+  work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  experience_level VARCHAR(32) NOT NULL DEFAULT 'unknown',
+  years_experience SMALLINT NULL,
+  h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)
