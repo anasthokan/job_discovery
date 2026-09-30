@@ -297,7 +297,7 @@ class JobsSpider(scrapy.Spider):
         if self._wanted(selected, "Greenhouse"):
             for board in GREENHOUSE_BOARDS:
                 yield scrapy.Request(
-                    f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs",
+                    f"https://boards-api.greenhouse.io/v1/boards/{board}/jobs?content=true",
                     callback=self.parse_greenhouse,
                     errback=self.errback,
                     headers=headers,
@@ -440,6 +440,9 @@ class JobsSpider(scrapy.Spider):
         item = JobItem()
         for key, value in fields.items():
             item[key] = value
+        description = strip_html(extra)
+        if description:
+            item["description"] = description[:60000]
         yield item
 
     def parse_remoteok(self, response):
@@ -500,7 +503,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("url") or "",
                 posted_at=str(posted),
-                search_text=row.get("jobExcerpt") or row.get("jobDescription") or "",
+                search_text=row.get("jobDescription") or row.get("jobExcerpt") or "",
             )
 
     def parse_muse(self, response):
@@ -633,6 +636,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("absolute_url") or "",
                 posted_at=str(posted),
+                search_text=row.get("content") or "",
             )
 
     def parse_lever(self, response, company=""):
@@ -686,7 +690,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=row.get("jobUrl") or row.get("applyUrl") or "",
                 posted_at=str(posted),
-                search_text=row.get("descriptionPlain") or "",
+                search_text=row.get("descriptionPlain") or row.get("descriptionHtml") or "",
             )
 
     def parse_smartrecruiters(self, response, company=""):
@@ -744,6 +748,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=url,
                 posted_at=str(posted),
+                search_text=row.get("description") or "",
             )
 
     def parse_linkedin(self, response):

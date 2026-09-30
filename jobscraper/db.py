@@ -312,11 +312,14 @@ def _row_from_item(job: dict) -> dict | None:
     if not source_id or not title or not company:
         return None
     skills = _as_skills_json(job.get("skills"))
-    try:
-        skill_names = json.loads(skills)
-    except json.JSONDecodeError:
-        skill_names = []
-    description = ", ".join(skill_names) if skill_names else title
+    description = str(job.get("description") or job.get("search_text") or "").strip()
+    if len(description) < 40:
+        try:
+            skill_names = json.loads(skills)
+        except json.JSONDecodeError:
+            skill_names = []
+        description = ", ".join(skill_names) if skill_names else title
+    description = description[:60000]
     try:
         days_ago = int(job.get("daysAgo") or 0)
     except (TypeError, ValueError):

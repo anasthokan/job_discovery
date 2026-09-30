@@ -86,7 +86,7 @@ def rows_to_jobs(records: list[dict]) -> list[dict]:
                 "platform": SITE_TO_PLATFORM.get(site, site.replace("_", " ").title()),
                 "url": str(url).strip(),
                 "posted_at": _posted(row.get("date_posted")),
-                "search_text": str(description)[:4000],
+                "search_text": str(description)[:60000],
             }
         )
     return jobs
