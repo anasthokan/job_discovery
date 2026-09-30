@@ -59,7 +59,7 @@ $webConfig = @"
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
   <system.webServer>
-    <proxy enabled="true" timeout="00:06:00" responseBufferLimit="0" />
+    <proxy enabled="true" timeout="00:12:00" responseBufferLimit="0" />
     <rewrite>
       <rules>
         <rule name="ReverseProxyToJobDiscovery" stopProcessing="true">

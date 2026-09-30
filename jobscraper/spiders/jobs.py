@@ -240,7 +240,7 @@ class JobsSpider(scrapy.Spider):
 
         if self._wanted(selected, "Jobicy"):
             yield scrapy.Request(
-                "https://jobicy.com/api/v2/remote-jobs?count=100",
+                "https://jobicy.com/api/v2/remote-jobs?count=200",
                 callback=self.parse_jobicy,
                 errback=self.errback,
                 headers=headers,
@@ -248,7 +248,7 @@ class JobsSpider(scrapy.Spider):
 
         if self._wanted(selected, "The Muse"):
             for category in MUSE_CATEGORIES:
-                for page in range(4):
+                for page in range(10):
                     params = {"page": str(page), "descending": "true", "category": category}
                     if city_or_state and city_or_state != "Remote":
                         params["location"] = city_or_state
@@ -260,7 +260,7 @@ class JobsSpider(scrapy.Spider):
                     )
 
         if self._wanted(selected, "Arbeitnow"):
-            for page in range(1, 8):
+            for page in range(1, 25):
                 yield scrapy.Request(
                     f"https://www.arbeitnow.com/api/job-board-api?page={page}",
                     callback=self.parse_arbeitnow,
@@ -269,7 +269,7 @@ class JobsSpider(scrapy.Spider):
                 )
 
         if self._wanted(selected, "Himalayas"):
-            for offset in (0, 100, 200, 300):
+            for offset in range(0, 1000, 100):
                 yield scrapy.Request(
                     f"https://himalayas.app/jobs/api?limit=100&offset={offset}",
                     callback=self.parse_himalayas,
@@ -347,9 +347,9 @@ class JobsSpider(scrapy.Spider):
         queries = self._search_queries()
         where = self._search_location()
         remote = self.location == "Remote"
-        # One page per query when scraping many fields so the crawl stays under timeout.
-        linkedin_pages = None if self.keywords and len(self.keywords) <= 3 else 1
-        dice_pages = None if self.keywords and len(self.keywords) <= 3 else 1
+        # A few pages per search so a full run can pass 1,000 saved US jobs.
+        linkedin_pages = None if self.keywords and len(self.keywords) <= 3 else 3
+        dice_pages = None if self.keywords and len(self.keywords) <= 3 else 2
 
         if self._wanted(selected, "LinkedIn"):
             for query in queries:
@@ -388,8 +388,8 @@ class JobsSpider(scrapy.Spider):
                     where,
                     jobspy_sites,
                     is_remote=remote,
-                    results_wanted=25 if single_board else 12,
-                    max_terms=3 if single_board else 2,
+                    results_wanted=80 if single_board else 40,
+                    max_terms=8 if single_board else 6,
                 )
             except Exception:
                 self.logger.exception("JobSpy scrape failed")

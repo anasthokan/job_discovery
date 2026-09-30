@@ -34,7 +34,7 @@ US jobs only. Remote + named US states. Foreign listings are dropped.
 | POST | `/api/recommend` | Rank listings from a skill list or resume JSON/text |
 | POST | `/api/recommend/file` | Upload a resume file, then rank listings |
 
-Scrape can take **20–60 seconds**. Recommend without `refresh` is fast (cache only).
+Scrape can take **several minutes** on a full run. Recommend without `refresh` is fast (cache only).
 
 ## List cached jobs
 
@@ -78,7 +78,7 @@ Query flags:
 curl -X POST "{BASE_URL}/api/scrape?keywords=&state=All&platform=All&days=7"
 ```
 
-`409` if another scrape is already running. `504` if it exceeds 5 minutes.
+`409` if another scrape is already running. `504` if it exceeds 12 minutes.
 
 This run is upserted into MySQL database `ezyjob`, table `jobs`, when `.env` has `MYSQL_DATABASE=ezyjob`. Duplicate URL/id rows are updated (`last_seen_at`), not inserted twice.
 
