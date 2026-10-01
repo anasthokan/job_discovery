@@ -309,12 +309,23 @@ def filter_employer_rows(rows: list[dict], company: str, state: dict) -> list[di
 
 
 def lookup(company: str) -> dict:
-    from jobscraper.db import everify_index
+    from jobscraper.db import everify_count, everify_index
 
-    row = match_company(company, everify_index())
+    index = everify_index()
+    if everify_count() <= 0 and not index:
+        return {
+            "e_verified": "unknown",
+            "e_verify_name": None,
+            "e_verify_status": None,
+            "e_verify_plus": None,
+            "enrolled": False,
+            "mou_registered": False,
+            "stem_opt_24_month": "unknown",
+        }
+    row = match_company(company, index)
     if not row:
         return {
-            "e_verified": False,
+            "e_verified": "false",
             "e_verify_name": None,
             "e_verify_status": None,
             "e_verify_plus": None,
@@ -324,7 +335,7 @@ def lookup(company: str) -> dict:
         }
     result = employer_result(row)
     return {
-        "e_verified": bool(result["enrolled"]),
+        "e_verified": "true" if result["enrolled"] else "false",
         "e_verify_name": result["employer"],
         "e_verify_status": result["account_status"],
         "e_verify_plus": row.get("everify_plus") or None,

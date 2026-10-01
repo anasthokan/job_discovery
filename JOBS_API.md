@@ -75,7 +75,7 @@ Query flags:
 | `h1b_sponsorship` | `""` | `yes` or `no`. `unknown` means the posting never says |
 | `clearance_required` | `""` | `yes` or `no` |
 | `years` | omit | Candidate years. Drops jobs that require more. Jobs with no stated years stay |
-| `e_verified` | `""` | `true` or `false` |
+| `e_verified` | `""` | `true`, `false`, or `unknown` |
 | `limit` | omit | Page size, max **200**. Omit to return every match, unless `page` is set |
 | `page` | omit | 1-based page. Overrides `offset`. With no `limit`, page size is **20** |
 | `offset` | `0` | Skip this many matches. Ignored when `page` is set |
@@ -106,7 +106,7 @@ Use this when the cache is empty or stale. Then call `/api/jobs` or `/api/recomm
 
 ## E-Verify flag
 
-Each listing includes `e_verified` as a boolean (company name matched against the public [E-Verify Employer Search](https://www.e-verify.gov/e-verify-employer-search) list). `true` means the name matched an enrolled employer. `false` means it did not. Names often differ (legal vs DBA), so `false` is not proof the employer is unenrolled.
+Each listing includes `e_verified`: `true`, `false`, or `unknown`. The employer list is saved in MySQL from `data/everify_employers.csv`. A job stays `unknown` until that table has rows. Then the company name is checked against the table: `true` if the name is there, `false` if it is not. Names often differ (legal vs DBA), so `false` is not proof the employer is unenrolled.
 
 Export the employer table from that page (Download → Crosstab/Data), save as `data/everify_employers.csv`, then:
 
@@ -222,7 +222,7 @@ HTTP `200`:
       "h1b_sponsorship": "yes",
       "clearance_required": "unknown",
       "posted_at": "2026-09-15",
-      "e_verified": false,
+      "e_verified": "unknown",
       "e_verify_name": null
     }
   ],

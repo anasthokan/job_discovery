@@ -1047,7 +1047,7 @@ def get_jobs(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
-    e_verified: str = Query("", description="true, false, or empty for all"),
+    e_verified: str = Query("", description="true, false, unknown, or empty for all"),
     work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
     job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
     experience_level: str = Query(
@@ -1077,9 +1077,9 @@ def get_jobs(
 ):
     jobs = filter_jobs(load_jobs(), parse_keywords(keywords), state, platform, days, city)
     wanted = e_verified.strip().lower()
-    if wanted in {"true", "false", "yes", "no", "1", "0", "unknown"}:
-        flag = wanted in {"true", "yes", "1"}
-        jobs = [job for job in jobs if job.get("e_verified") is flag]
+    wanted = {"yes": "true", "no": "false", "1": "true", "0": "false"}.get(wanted, wanted)
+    if wanted in {"true", "false", "unknown"}:
+        jobs = [job for job in jobs if (job.get("e_verified") or "unknown") == wanted]
     jobs = apply_listing_filters(
         jobs,
         work_model=work_model,
@@ -1212,7 +1212,8 @@ def everify_status():
         "note": (
             "Export the employer table from the E-Verify search tool "
             "(Download → Crosstab/Data) and save as data/everify_employers.csv, "
-            "then POST /api/everify/refresh. Unmatched companies are e_verified false."
+            "then POST /api/everify/refresh. Jobs stay unknown until that table is loaded. "
+            "A name in the table is e_verified true; a name that is not is false."
         ),
     }
 

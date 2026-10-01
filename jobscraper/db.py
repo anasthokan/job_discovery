@@ -110,12 +110,14 @@ INSERT INTO {JOBS_TABLE} (
   listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
-  %s, %s, %s, %s, %s, 1, 'false', '',
+  %s, %s, %s, %s, %s, 1, 'unknown', '',
   %s, %s, %s, %s, %s, %s,
   1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
+  e_verified = IF({JOBS_TABLE}.company <=> new.company, {JOBS_TABLE}.e_verified, 'unknown'),
+  e_verify_name = IF({JOBS_TABLE}.company <=> new.company, {JOBS_TABLE}.e_verify_name, ''),
   company = new.company,
   company_ref_id = COALESCE(new.company_ref_id, {JOBS_TABLE}.company_ref_id),
   skills = new.skills,
@@ -230,7 +232,7 @@ def _ensure_job_columns(cur) -> None:
     if not cur.fetchone():
         cur.execute(
             f"ALTER TABLE {JOBS_TABLE} "
-            "ADD COLUMN e_verified VARCHAR(16) NOT NULL DEFAULT 'false'"
+            "ADD COLUMN e_verified VARCHAR(16) NOT NULL DEFAULT 'unknown'"
         )
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'e_verify_name'")
     if not cur.fetchone():
@@ -578,12 +580,16 @@ def _days_ago_from_iso(value: str | None, fallback: int = 0) -> int:
     return max(0, int((datetime.now(timezone.utc) - posted).total_seconds() // 86400))
 
 
-def _as_e_verified(value) -> bool:
+def _as_e_verified(value) -> str:
+    """Stored flag as true, false, or unknown."""
     if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return str(value or "").strip().lower() in {"true", "yes", "1"}
+        return "true" if value else "false"
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "1"}:
+        return "true"
+    if text in {"false", "no", "0"}:
+        return "false"
+    return "unknown"
 
 
 def _job_from_row(row: dict) -> dict:
@@ -619,6 +625,14 @@ def load_jobs() -> list[dict]:
         conn = get_conn()
         if conn is None:
             return []
+        try:
+            enrich_jobs_everify(only_unknown=True)
+        except Exception:
+            log.exception("Could not resolve unknown e_verified rows")
+            close_conn()
+            conn = get_conn()
+            if conn is None:
+                return []
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
@@ -771,7 +785,7 @@ def replace_everify_employers(rows: list[dict]) -> int:
 
 def everify_index() -> dict:
     global _EVERIFY_INDEX
-    from jobscraper.everify import build_index
+    from jobscraper.everify import build_index, load_rows_from_csv
 
     if _EVERIFY_INDEX is not None:
         return _EVERIFY_INDEX
@@ -789,6 +803,12 @@ def everify_index() -> dict:
             except Exception:
                 close_conn()
                 rows = []
+    if not rows:
+        imported = load_rows_from_csv()
+        if imported and mysql_configured():
+            replace_everify_employers(imported)
+            return _EVERIFY_INDEX or {}
+        rows = imported
     _EVERIFY_INDEX = build_index(rows)
     return _EVERIFY_INDEX
 
@@ -836,35 +856,53 @@ def everify_count() -> int:
         return 0
 
 
-def enrich_jobs_everify() -> dict:
+def enrich_jobs_everify(*, only_unknown: bool = False) -> dict:
+    """Set job e_verified from the E-Verify employer table in this database.
+
+    A job stays unknown until that table has rows. Then a name match is true
+    and a miss is false. only_unknown skips rows that were already checked.
+    """
     from jobscraper.everify import match_company
 
+    empty = {"updated": 0, "true": 0, "false": 0, "unknown": 0, "employers": 0}
     if not mysql_configured():
-        return {"updated": 0, "yes": 0, "unknown": 0, "employers": everify_count()}
+        return {**empty, "employers": everify_count()}
     conn = get_conn()
     if conn is None:
-        return {"updated": 0, "yes": 0, "unknown": 0, "employers": 0}
+        return empty
     index = everify_index()
+    employers = everify_count()
+    if employers <= 0:
+        return empty
+    where = ""
+    if only_unknown:
+        where = " WHERE e_verified IS NULL OR TRIM(e_verified) = '' OR LOWER(e_verified) = 'unknown'"
     with conn.cursor() as cur:
-        cur.execute(f"SELECT id, company FROM {JOBS_TABLE}")
+        cur.execute(f"SELECT id, company FROM {JOBS_TABLE}{where}")
         jobs = list(cur.fetchall() or [])
-        yes = 0
-        unknown = 0
+        matched = 0
+        missed = 0
         for job in jobs:
             hit = match_company(job.get("company") or "", index)
             if hit:
-                yes += 1
+                matched += 1
                 status = "true"
                 name = hit.get("employer") or hit.get("dba")
             else:
-                unknown += 1
+                missed += 1
                 status = "false"
                 name = ""
             cur.execute(
                 f"UPDATE {JOBS_TABLE} SET e_verified = %s, e_verify_name = %s WHERE id = %s",
                 (status, (name or "")[:255], job.get("id")),
             )
-    return {"updated": len(jobs), "yes": yes, "unknown": unknown, "employers": everify_count()}
+    return {
+        "updated": len(jobs),
+        "true": matched,
+        "false": missed,
+        "unknown": 0,
+        "employers": employers,
+    }
 
 
 def health() -> dict:
