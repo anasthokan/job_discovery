@@ -66,6 +66,7 @@ from jobscraper.db import (
     init_db as init_mysql,
     job_count as mysql_job_count,
     last_scrape_meta,
+    load_app_user,
     load_candidate as load_candidate_mysql,
     load_jobs as load_jobs_mysql,
     mysql_configured,
@@ -1581,10 +1582,17 @@ def _candidate_skills_or_http(profile: dict, explicit: list[str] | None = None) 
 def _require_candidate(candidate_id: str) -> tuple[str, dict]:
     cid = _candidate_id_or_http(candidate_id)
     profile = _stored_candidate(cid)
+    if profile is None and mysql_configured():
+        try:
+            profile = load_app_user(cid)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not load user {cid}: {exc}") from exc
+        if profile is not None:
+            profile = normalize_profile(profile)
     if profile is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No profile saved for candidate_id '{cid}'. PUT /api/candidates/{cid} during registration.",
+            detail=f"No user found for id '{cid}'.",
         )
     return cid, profile
 

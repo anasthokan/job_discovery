@@ -733,6 +733,129 @@ def save_candidate(candidate_id: str, profile: dict) -> None:
         )
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def _quote_ident(name: str) -> str:
+    if not _IDENT_RE.fullmatch(name or ""):
+        raise ValueError(f"Unsafe SQL name: {name}")
+    return f"`{name}`"
+
+
+def load_app_user(candidate_id: str) -> dict | None:
+    """Read an ezyjob.users row (numeric id or public_id) into a recommend profile."""
+    if not mysql_configured():
+        return None
+    conn = get_conn()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            if str(candidate_id).isdigit():
+                cur.execute(
+                    "SELECT id, email, first_name, last_name FROM users WHERE id = %s LIMIT 1",
+                    (int(candidate_id),),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, email, first_name, last_name FROM users WHERE public_id = %s LIMIT 1",
+                    (candidate_id,),
+                )
+            user = cur.fetchone()
+            if not user:
+                return None
+            user_id = int(user["id"])
+            profile_row = _profile_row(cur, user_id)
+            skills = _user_skill_values(cur, user_id, profile_row.get("profile_id"))
+    except Exception:
+        log.exception("load_app_user failed for %s", candidate_id)
+        close_conn()
+        raise
+    summary = " ".join(
+        part
+        for part in (
+            profile_row.get("headline") or "",
+            profile_row.get("professional_summary") or "",
+        )
+        if part
+    )
+    return {
+        "first_name": user.get("first_name") or "",
+        "last_name": user.get("last_name") or "",
+        "email": user.get("email") or "",
+        "phone": profile_row.get("phone") or "",
+        "city": profile_row.get("city") or "",
+        "linkedin_url": profile_row.get("linkedin_url") or "",
+        "skills": skills,
+        "resume_text": summary,
+    }
+
+
+def _profile_row(cur, user_id: int) -> dict:
+    try:
+        cur.execute(
+            "SELECT id AS profile_id, phone, headline, professional_summary, linkedin_url, city "
+            "FROM profiles WHERE user_id = %s LIMIT 1",
+            (user_id,),
+        )
+        return cur.fetchone() or {}
+    except Exception:
+        log.exception("profiles lookup failed for user %s", user_id)
+        return {}
+
+
+def _user_skill_values(cur, user_id: int, profile_id) -> list[str]:
+    cur.execute(
+        """
+        SELECT c.TABLE_NAME AS table_name,
+               c.COLUMN_NAME AS skill_column,
+               u.COLUMN_NAME AS owner_column
+        FROM information_schema.COLUMNS c
+        JOIN information_schema.COLUMNS u
+          ON u.TABLE_SCHEMA = c.TABLE_SCHEMA
+         AND u.TABLE_NAME = c.TABLE_NAME
+         AND u.COLUMN_NAME IN ('user_id', 'profile_id')
+        WHERE c.TABLE_SCHEMA = DATABASE()
+          AND (c.COLUMN_NAME LIKE %s OR c.TABLE_NAME LIKE %s)
+          AND c.DATA_TYPE IN ('varchar', 'char', 'text', 'mediumtext', 'longtext', 'json')
+          AND c.COLUMN_NAME NOT IN ('user_id', 'profile_id', 'id')
+        """,
+        ("%skill%", "%skill%"),
+    )
+    found: list[str] = []
+    for row in cur.fetchall() or []:
+        owner = row.get("owner_column")
+        key = user_id if owner == "user_id" else profile_id
+        if key is None:
+            continue
+        table = str(row.get("table_name") or "")
+        column = str(row.get("skill_column") or "")
+        if not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(column) or owner not in {"user_id", "profile_id"}:
+            continue
+        try:
+            cur.execute(
+                f"SELECT {_quote_ident(column)} AS skill FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(owner)} = %s LIMIT 40",
+                (key,),
+            )
+            skill_rows = cur.fetchall() or []
+        except Exception:
+            log.exception("skill lookup failed on %s.%s", table, column)
+            continue
+        for skill_row in skill_rows:
+            value = skill_row.get("skill")
+            if isinstance(value, (bytes, bytearray)):
+                value = value.decode("utf-8", "ignore")
+            if isinstance(value, str) and value.strip().startswith("["):
+                parsed = _profile_from_cell(value)
+                if isinstance(parsed, list):
+                    found.extend(str(item) for item in parsed)
+                    continue
+            if value:
+                found.append(str(value))
+    return found
+
+
 def load_candidate(candidate_id: str) -> dict | None:
     if not mysql_configured():
         return None
