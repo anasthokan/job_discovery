@@ -1037,6 +1037,7 @@ def filters():
         "experience_levels": list(EXPERIENCE_LEVELS),
         "h1b_sponsorship": ["yes", "no"],
         "clearance_required": ["yes", "no"],
+        "us_citizen_required": ["yes", "no"],
     }
 
 
@@ -1056,6 +1057,7 @@ def get_jobs(
     ),
     h1b_sponsorship: str = Query("", description="yes or no"),
     clearance_required: str = Query("", description="yes or no"),
+    us_citizen_required: str = Query("", description="yes, no, or unknown"),
     years: int | None = Query(
         None,
         ge=0,
@@ -1087,6 +1089,7 @@ def get_jobs(
         experience_level=experience_level,
         h1b_sponsorship=h1b_sponsorship,
         clearance_required=clearance_required,
+        us_citizen_required=us_citizen_required,
         years=years,
     )
     limit, offset = _resolve_jobs_window(limit, offset, page)

@@ -10,6 +10,7 @@ and description are enough to fill the values the dashboard already shows:
   years_experience    minimum years stated in the posting, or null
   h1b_sponsorship     yes | no | unknown
   clearance_required  yes | no | unknown
+  us_citizen_required yes | no | unknown
 """
 
 from __future__ import annotations
@@ -133,6 +134,42 @@ _CLEARANCE_YES = re.compile(
     r"|\bability to obtain(?: a)? (?:a )?clearance\b",
     re.I,
 )
+# Secret and Top Secret clearances are only granted to US citizens; Public Trust is not.
+_CITIZEN_CLEARANCE = re.compile(
+    r"\bts/sci\b|\btop secret\b|\bsecret clearance\b|\b(?:active|current) secret\b"
+    r"|\b(?:obtain|maintain|hold|possess)(?: an?)? (?:active )?(?:dod |federal )?(?:security )?clearance\b",
+    re.I,
+)
+
+_US_NAME = r"(?:us|united states|american)"
+_CITIZEN_YES = re.compile(
+    rf"\bmust be (?:an? )?{_US_NAME} citizens?\b"
+    rf"|\bmust be (?:an? )?citizens? of the (?:us|united states)\b"
+    rf"|\b{_US_NAME} citizens? only\b"
+    rf"|\bonly (?:open to )?{_US_NAME} citizens?\b"
+    rf"|\b{_US_NAME} citizens? (?:is |are )?(?:required|needed)\b"
+    rf"|\b{_US_NAME} citizenship (?:is |will be )?(?:required|mandatory|needed|a must)\b"
+    rf"|\b(?:requires?|requiring|required) (?:active )?{_US_NAME} citizenship\b"
+    rf"|\bmust (?:have|hold|possess|maintain|provide proof of) {_US_NAME} citizenship\b"
+    rf"|\b(?:applicants|candidates) must be {_US_NAME} citizens\b"
+    rf"|\b(?:requirements?|eligibility)\s*:?\s*{_US_NAME} citizenship\b"
+    r"|\bcitizenship (?:is )?required\b"
+    r"|\bcitizenship requirement\b",
+    re.I,
+)
+_CITIZEN_NO = re.compile(
+    rf"\b(?:{_US_NAME} )?citizenship (?:is )?not (?:required|necessary|needed|a requirement)\b"
+    r"|\bno (?:us )?citizenship (?:requirement|required)\b"
+    r"|\b(?:do|does|did)\s*(?:not|n['’]t) (?:need|have) to be (?:an? )?(?:us )?citizens?\b"
+    r"|\bcitizens?\s*(?:,|/|or|and)\s*(?:lawful )?(?:permanent residents?|green[\s-]?card(?: holders?)?|gc(?: holders?)?)\b"
+    r"|\b(?:lawful )?(?:permanent residents?|green[\s-]?card(?: holders?)?|gc(?: holders?)?)\s*(?:,|/|or|and)\s*(?:us )?citizens?\b"
+    r"|\busc\s*/\s*gc\b|\bgc\s*/\s*usc\b"
+    r"|\bus persons?\b"
+    r"|\b(?:h-?1b|opt|cpt|ead|tn|f-?1)\b.{0,40}\b(?:welcome|accepted|considered|eligible)\b"
+    r"|\b(?:open to|accept(?:s|ing)?|welcome)\b.{0,20}\b(?:all|any) (?:work authorizations?|visa types?|visas)\b",
+    re.I,
+)
+_US_DOTTED = re.compile(r"\bU\.\s?S\.(?:\s?A\.)?", re.I)
 
 _JOB_TYPE_ALIASES = {
     "full-time": "fulltime",
@@ -277,6 +314,7 @@ def _yes_no(text: str, no_re: re.Pattern[str], yes_re: re.Pattern[str]) -> str:
     """Negation only counts inside the same sentence, so 'No experience. Visa sponsorship' stays yes."""
     saw_no = False
     saw_yes = False
+    text = _US_DOTTED.sub("US", text)
     for sentence in re.split(r"[\n.;]+", text):
         if no_re.search(sentence):
             saw_no = True
@@ -297,6 +335,25 @@ def infer_clearance(title: str = "", description: str = "") -> str:
     return _yes_no(_clip_text(title, description), _CLEARANCE_NO, _CLEARANCE_YES)
 
 
+def infer_us_citizen(title: str = "", description: str = "") -> str:
+    """yes when the posting demands US citizenship, no when it is open to non-citizens.
+
+    Secret / Top Secret clearance implies citizenship. Visa sponsorship, green card
+    holders, or US persons (ITAR) mean citizenship itself is not required.
+    """
+    text = _clip_text(title, description)
+    stated = _yes_no(text, _CITIZEN_NO, _CITIZEN_YES)
+    if stated == "yes":
+        return "yes"
+    if infer_clearance(title, description) == "yes" and _CITIZEN_CLEARANCE.search(text):
+        return "yes"
+    if stated == "no":
+        return "no"
+    if infer_h1b(title, description) == "yes":
+        return "no"
+    return "unknown"
+
+
 def infer_listing_fields(
     *,
     title: str = "",
@@ -314,6 +371,7 @@ def infer_listing_fields(
         "years_experience": years,
         "h1b_sponsorship": infer_h1b(title or "", description or ""),
         "clearance_required": infer_clearance(title or "", description or ""),
+        "us_citizen_required": infer_us_citizen(title or "", description or ""),
     }
 
 
@@ -329,6 +387,7 @@ def apply_listing_filters(
     experience_level: str = "",
     h1b_sponsorship: str = "",
     clearance_required: str = "",
+    us_citizen_required: str = "",
     years: int | None = None,
 ) -> list[dict]:
     """Keep listings that match the Explore Jobs dropdowns. Blank filters are ignored."""
@@ -337,7 +396,8 @@ def apply_listing_filters(
     levels = {_LEVEL_ALIASES.get(part, part) for part in _split(experience_level)}
     h1b = set(_split(h1b_sponsorship))
     clearance = set(_split(clearance_required))
-    if not any((work, types, levels, h1b, clearance)) and years is None:
+    citizen = set(_split(us_citizen_required))
+    if not any((work, types, levels, h1b, clearance, citizen)) and years is None:
         return jobs
     kept = []
     for job in jobs:
@@ -350,6 +410,8 @@ def apply_listing_filters(
         if h1b and (job.get("h1b_sponsorship") or "unknown") not in h1b:
             continue
         if clearance and (job.get("clearance_required") or "unknown") not in clearance:
+            continue
+        if citizen and (job.get("us_citizen_required") or "unknown") not in citizen:
             continue
         if years is not None:
             required = job.get("years_experience")

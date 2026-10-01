@@ -74,6 +74,7 @@ Query flags:
 | `experience_level` | `""` | Comma-separated: `Intern/New Grad`, `Entry Level`, `Mid Level`, `Senior Level`, `Lead/Staff`, `Director/Executive` |
 | `h1b_sponsorship` | `""` | `yes` or `no`. `unknown` means the posting never says |
 | `clearance_required` | `""` | `yes` or `no` |
+| `us_citizen_required` | `""` | `yes`, `no`, or `unknown`. `yes` = posting demands US citizenship |
 | `years` | omit | Candidate years. Drops jobs that require more. Jobs with no stated years stay |
 | `e_verified` | `""` | `true`, `false`, or `unknown` |
 | `limit` | omit | Page size, max **200**. Omit to return every match, unless `page` is set |
@@ -221,6 +222,7 @@ HTTP `200`:
       "years_experience": 5,
       "h1b_sponsorship": "yes",
       "clearance_required": "unknown",
+      "us_citizen_required": "no",
       "posted_at": "2026-09-15",
       "e_verified": "unknown",
       "e_verify_name": null
@@ -247,7 +249,9 @@ HTTP `200`:
 
 Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 
-`work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, and `clearance_required` are saved on each row. They are read from the posting title, location, and description when the board does not send them. `unknown` means the posting never said. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
+`work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, `clearance_required`, and `us_citizen_required` are saved on each row. They are read from the posting title, location, and description when the board does not send them. `unknown` means the posting never said. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
+
+`us_citizen_required` is `yes` when the posting says so ("must be a U.S. citizen", "US citizenship required", "U.S. citizens only") or asks for a Secret / Top Secret / TS/SCI clearance, which only citizens can hold. It is `no` when the posting is open to non-citizens: citizen **or** green card / permanent resident, "U.S. person" (ITAR), visa sponsorship offered, or H1B/OPT welcome. Otherwise `unknown`.
 
 ## Success response (recommend)
 

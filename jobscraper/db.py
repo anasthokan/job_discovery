@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   years_experience SMALLINT NULL,
   h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
@@ -107,12 +108,12 @@ INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, posted_at, is_active, e_verified, e_verify_name,
   job_type, work_model, experience_level, years_experience, h1b_sponsorship, clearance_required,
-  listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
+  us_citizen_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, 1, 'unknown', '',
   %s, %s, %s, %s, %s, %s,
-  1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -134,6 +135,7 @@ ON DUPLICATE KEY UPDATE
   years_experience = new.years_experience,
   h1b_sponsorship = new.h1b_sponsorship,
   clearance_required = new.clearance_required,
+  us_citizen_required = new.us_citizen_required,
   listing_inferred = 1,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
@@ -254,6 +256,14 @@ def _ensure_job_columns(cur) -> None:
         cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'us_citizen_required'")
+    if not cur.fetchone():
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} "
+            "ADD COLUMN us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'unknown'"
+        )
+        # Re-run inference on saved rows so the new column is filled.
+        cur.execute(f"UPDATE {JOBS_TABLE} SET listing_inferred = 0")
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -293,7 +303,7 @@ def init_db() -> bool:
 
 
 def backfill_listing_fields() -> int:
-    """Fill work model, experience, H1B, and clearance on rows saved before those columns existed."""
+    """Fill work model, experience, H1B, clearance, and US citizen on rows saved before those columns existed."""
     if not mysql_configured():
         return 0
     from jobscraper.job_fields import infer_listing_fields
@@ -327,6 +337,7 @@ def backfill_listing_fields() -> int:
                             fields["years_experience"],
                             fields["h1b_sponsorship"],
                             fields["clearance_required"],
+                            fields["us_citizen_required"],
                             fields["job_type"],
                             row["id"],
                         )
@@ -334,7 +345,7 @@ def backfill_listing_fields() -> int:
                 cur.executemany(
                     f"UPDATE {JOBS_TABLE} SET work_model=%s, experience_level=%s, "
                     f"years_experience=%s, h1b_sponsorship=%s, clearance_required=%s, "
-                    f"job_type=%s, listing_inferred=1 WHERE id=%s",
+                    f"us_citizen_required=%s, job_type=%s, listing_inferred=1 WHERE id=%s",
                     payload,
                 )
         log.info("Backfilled listing fields on %s jobs", len(payload))
@@ -412,6 +423,7 @@ def _listing_fields(job: dict, description: str) -> dict:
         "years_experience": fields["years_experience"],
         "h1b_sponsorship": str(fields["h1b_sponsorship"] or "unknown")[:16],
         "clearance_required": str(fields["clearance_required"] or "unknown")[:16],
+        "us_citizen_required": str(fields["us_citizen_required"] or "unknown")[:16],
     }
 
 
@@ -539,6 +551,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["years_experience"],
                         row["h1b_sponsorship"],
                         row["clearance_required"],
+                        row["us_citizen_required"],
                     )
                     for row in rows
                 ]
@@ -612,6 +625,7 @@ def _job_from_row(row: dict) -> dict:
         "years_experience": _years_value(row.get("years_experience")),
         "h1b_sponsorship": row.get("h1b_sponsorship") or "unknown",
         "clearance_required": row.get("clearance_required") or "unknown",
+        "us_citizen_required": row.get("us_citizen_required") or "unknown",
         "posted_at": posted,
         "e_verified": _as_e_verified(row.get("e_verified")),
         "e_verify_name": row.get("e_verify_name"),
@@ -638,7 +652,8 @@ def load_jobs() -> list[dict]:
                 f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
                 f"days_ago, url, description, job_type, work_model, experience_level, "
-                f"years_experience, h1b_sponsorship, clearance_required, posted_at, e_verified, e_verify_name "
+                f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
+                f"posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []
