@@ -1649,23 +1649,51 @@ def recommend_for_candidate(
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
+    skills: str = Query("", description="Optional comma-separated skills. Used when the user profile has none."),
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     page: int = Query(1, ge=1),
     refresh: bool = Query(False),
 ):
     cid, profile = _require_candidate(candidate_id)
-    return _recommend_payload(
-        skills=_candidate_skills_or_http(profile),
-        state=state,
-        platform=platform,
-        days=days,
-        city=city,
-        limit=limit,
-        refresh=refresh,
-        page=page,
-        candidate_id=cid,
-        profile=profile,
-    )
+    found = parse_skill_query(skills) or skills_from_profile(profile)
+    if found:
+        return _recommend_payload(
+            skills=found,
+            state=state,
+            platform=platform,
+            days=days,
+            city=city,
+            limit=limit,
+            refresh=refresh,
+            page=page,
+            candidate_id=cid,
+            profile=profile,
+        )
+    pool = load_jobs()
+    filtered = filter_jobs(pool, [], "All" if not state or state == "All" else state, platform, days, "" if not city else city)
+    if profile is not None:
+        filtered = filter_jobs_for_candidate(filtered, profile, state=state, city=city)
+    start = (page - 1) * limit
+    rows = filtered[start : start + limit]
+    hint = "No skills are stored for this user, so these are the latest listings."
+    if not pool:
+        hint = _empty_cache_hint()
+    elif not filtered:
+        hint = "No listings matched this user's location or visa preferences."
+    return {
+        "ok": True,
+        "candidate_id": cid,
+        "skills": [],
+        "jobs": _with_time_ago(rows),
+        "count": len(rows),
+        "total": len(filtered),
+        "limit": limit,
+        "offset": start,
+        "pagination": _pagination(len(filtered), limit, start),
+        "filters": applied_filters(profile or {}, state=state, city=city),
+        "hint": hint,
+        **cache_meta(),
+    }
 
 
 @app.post(
