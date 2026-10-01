@@ -31,7 +31,10 @@ US jobs only. Remote + named US states. Foreign listings are dropped.
 | POST | `/api/scrape` | Scrape boards, save to MySQL, return this run |
 | GET | `/api/scrape/status` | MySQL + last scrape + next schedule |
 | GET | `/api/recommend` | Contract |
-| POST | `/api/recommend` | Rank listings from a skill list or resume JSON/text |
+| GET | `/api/recommend/{candidate_id}` | Rank listings for the profile saved at registration |
+| PUT | `/api/candidates/{candidate_id}` | Save the registration profile under that API id |
+| POST | `/api/candidates/{candidate_id}/resume` | Attach the master resume and extract skills |
+| POST | `/api/recommend` | Rank listings from a candidate id, skill list, or resume |
 | POST | `/api/recommend/file` | Upload a resume file, then rank listings |
 
 Scrape can take **several minutes** on a full run. Recommend without `refresh` is fast (cache only).
@@ -125,6 +128,55 @@ The E-Verify Checker screen (company, state, industry, STEM OPT) is `EVERIFY_API
 | GET | `/api/everify/lookup` | Check one company name |
 | POST | `/api/everify/refresh` | Reload CSV and rematch all saved jobs |
 
+## Recommend by candidate API id
+
+Registration creates the candidate in ezyjob. Pass that same id here. Do not send the password or EEO answers (gender, race, veteran, disability). Those are ignored and are not used to rank jobs.
+
+Save the profile once, when the user finishes registration:
+
+```bash
+curl -X PUT "{BASE_URL}/api/candidates/123" ^
+  -H "Content-Type: application/json" ^
+  -d "{\"first_name\":\"Zain\",\"last_name\":\"Mohammed\",\"email\":\"name@company.com\",\"phone_code\":\"+1\",\"phone\":\"5552345678\",\"city\":\"San Francisco\",\"state\":\"CA\",\"zip_code\":\"94105\",\"country\":\"United States\",\"linkedin_url\":\"https://linkedin.com/in/username\",\"github_url\":\"https://github.com/username\",\"work_history\":[{\"company\":\"Google\",\"job_title\":\"Software Engineer\",\"start_date\":\"2022-01\",\"end_date\":\"Present\",\"description\":\"Python, FastAPI, AWS\"}],\"education\":[{\"school\":\"Stanford University\",\"degree\":\"B.S.\",\"field_of_study\":\"Computer Science\",\"graduation_year\":\"2021\"}],\"authorized_to_work\":\"yes\",\"need_visa_sponsorship\":\"no\",\"willing_to_relocate\":\"no\",\"open_to_remote\":\"yes\",\"desired_salary\":\"130000\"}"
+```
+
+`state` can be `CA` or `California`. Skills are read from `skills`, `resume_text`, work history, and education.
+
+Master resume from step 4:
+
+```bash
+curl -X POST "{BASE_URL}/api/candidates/123/resume" -F "file=@C:\path\to\resume.pdf"
+```
+
+Then recommend with only the id:
+
+```bash
+curl "{BASE_URL}/api/recommend/123?limit=20"
+```
+
+```js
+const res = await fetch(`${BASE_URL}/api/recommend/${candidateId}?limit=20`);
+const data = await res.json();
+if (!res.ok) throw new Error(data.detail || "Recommend failed");
+// data.candidate_id, data.skills, data.filters, data.jobs
+// data.jobs[0].api_id is ezyjob.jobs.id — use this in the app
+// data.jobs[0].id is the board source id
+```
+
+`POST /api/recommend` with `{ "candidate_id": "123" }` does the same thing. Extra `skills` on that body replace the saved skill list for this call only.
+
+Preferences from registration:
+
+| Field | Effect |
+| --- | --- |
+| `willing_to_relocate` `no` | Keep the candidate's state, plus remote jobs when `open_to_remote` is not `no` |
+| `willing_to_relocate` `yes` | Any US state |
+| `open_to_remote` `no` | Drop remote listings |
+| `need_visa_sponsorship` `yes`, or `authorized_to_work` `no` | Drop listings that say no sponsorship or require US citizenship |
+| Work history dates | Drop listings that ask for more years than the candidate has |
+
+`404` if that id was never saved. `400` if the profile has no skills yet.
+
 ## Recommend from skills
 
 ```bash
@@ -207,6 +259,7 @@ HTTP `200`:
   "jobs": [
     {
       "id": "remotive-1680495",
+      "api_id": 1842,
       "title": "Senior Backend Engineer",
       "company": "Northwind Labs",
       "skills": ["Python", "FastAPI", "AWS"],
@@ -247,6 +300,8 @@ HTTP `200`:
 
 `count` is the jobs in this page. `total` is every match for the filters. `pagination.page` starts at 1. Request `page=2` (or `offset=20` with the same `limit`) for the next page.
 
+`api_id` is the numeric `jobs.id` primary key in the ezyjob database. Use that id in the app. `id` stays the board source id (`remotive-1680495`) and still works as `job_id` on `/api/cv/from-job`. `/api/cv/from-job` also accepts `api_id`.
+
 Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 
 `work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, `clearance_required`, and `us_citizen_required` are saved on each row. They are read from the posting title, location, and description when the board does not send them. `unknown` means the posting never said. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
@@ -265,6 +320,7 @@ HTTP `200`:
   "jobs": [
     {
       "id": "remotive-1680495",
+      "api_id": 1842,
       "title": "Senior Backend Engineer",
       "company": "Northwind Labs",
       "skills": ["Python", "FastAPI", "AWS"],
@@ -298,7 +354,8 @@ JSON `{ "detail": "..." }`.
 
 | Status | When |
 | --- | --- |
-| 400 | No skills, and resume / text had none |
+| 400 | No skills, and resume / text had none. Or the saved candidate has no skills |
+| 404 | `candidate_id` was never saved with PUT `/api/candidates/{candidate_id}` |
 | 409 | A scrape is already running (`refresh=true` or `/api/scrape`) |
 | 413 | Resume file larger than 8 MB |
 | 415 | Unsupported resume file type |

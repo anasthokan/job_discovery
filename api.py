@@ -22,6 +22,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from jobscraper.ats_score import AtsScoreError, score_resume
+from jobscraper.candidates import (
+    CandidateError,
+    clean_candidate_id,
+    filter_jobs_for_candidate,
+    load_candidate_file,
+    normalize_profile,
+    save_candidate_file,
+    skills_from_profile,
+    applied_filters,
+)
 from jobscraper.document_convert import (
     ConvertError,
     DOCX_TYPE,
@@ -56,8 +66,10 @@ from jobscraper.db import (
     init_db as init_mysql,
     job_count as mysql_job_count,
     last_scrape_meta,
+    load_candidate as load_candidate_mysql,
     load_jobs as load_jobs_mysql,
     mysql_configured,
+    save_candidate as save_candidate_mysql,
     replace_everify_employers,
     start_scrape_run,
     upsert_jobs,
@@ -309,7 +321,66 @@ class CvFromJobResponse(BaseModel):
     cv_text: str | None = None
 
 
+class CandidateJob(BaseModel):
+    company: str = ""
+    job_title: str = ""
+    start_date: str = ""
+    end_date: str = ""
+    description: str = ""
+
+
+class CandidateSchool(BaseModel):
+    school: str = ""
+    degree: str = ""
+    field_of_study: str = ""
+    graduation_year: str = ""
+    gpa: str | None = None
+
+
+class CandidateAnswer(BaseModel):
+    question: str = ""
+    answer: str = ""
+
+
+class CandidateProfile(BaseModel):
+    """Fields collected on the ezyjob registration screens. Password and EEO are ignored."""
+
+    first_name: str = ""
+    last_name: str = ""
+    preferred_name: str = ""
+    pronouns: str = ""
+    email: str = ""
+    phone_code: str = ""
+    phone: str = ""
+    city: str = ""
+    state: str = ""
+    zip_code: str = ""
+    country: str = ""
+    linkedin_url: str = ""
+    github_url: str = ""
+    portfolio_url: str = ""
+    personal_website: str = ""
+    work_history: list[CandidateJob] = Field(default_factory=list)
+    education: list[CandidateSchool] = Field(default_factory=list)
+    custom_answers: list[CandidateAnswer] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    resume_text: str = ""
+    cover_letter_text: str = ""
+    authorized_to_work: str = ""
+    need_visa_sponsorship: str = ""
+    willing_to_relocate: str = ""
+    open_to_remote: str = ""
+    is_18_or_older: str = ""
+    desired_salary: str = ""
+    notice_period: str = ""
+    how_heard: str = ""
+
+
 class RecommendRequest(BaseModel):
+    candidate_id: str | None = Field(
+        None,
+        description="Candidate API id from registration. Loads the saved profile.",
+    )
     skills: list[str] = Field(default_factory=list, description="Candidate skills, e.g. Python, FastAPI, AWS")
     resume_text: str | None = Field(None, description="Optional raw resume text; skills are extracted from it")
     resume: ResumeInput | None = Field(None, description="Optional parsed resume JSON from /api/resume/parse")
@@ -741,6 +812,34 @@ def _skills_from_inputs(
     return found
 
 
+def _store_candidate(candidate_id: str, profile: dict) -> dict:
+    saved = normalize_profile(profile)
+    if mysql_configured():
+        try:
+            save_candidate_mysql(candidate_id, saved)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not save candidate: {exc}") from exc
+        return saved
+    save_candidate_file(candidate_id, saved)
+    return saved
+
+
+def _stored_candidate(candidate_id: str) -> dict | None:
+    if mysql_configured():
+        try:
+            return load_candidate_mysql(candidate_id)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Could not load candidate: {exc}") from exc
+    return load_candidate_file(candidate_id)
+
+
+def _candidate_id_or_http(value: str) -> str:
+    try:
+        return clean_candidate_id(value)
+    except CandidateError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 def _recommend_payload(
     *,
     skills: list[str],
@@ -750,6 +849,9 @@ def _recommend_payload(
     city: str,
     limit: int,
     refresh: bool,
+    page: int = 1,
+    candidate_id: str | None = None,
+    profile: dict | None = None,
 ) -> dict:
     if refresh:
         if not SCRAPE_LOCK.acquire(blocking=False):
@@ -760,21 +862,40 @@ def _recommend_payload(
             raise HTTPException(status_code=504, detail="Job scrape timed out.") from exc
         finally:
             SCRAPE_LOCK.release()
-    filtered = filter_jobs(load_jobs(), [], state, platform, days, city)
-    ranked = recommend_jobs(filtered, skills, limit=limit)
+    list_state = "All" if profile is not None and (not state or state == "All") else state
+    list_city = "" if profile is not None and not city else city
+    pool = load_jobs()
+    filtered = filter_jobs(pool, [], list_state, platform, days, list_city)
+    if profile is not None:
+        filtered = filter_jobs_for_candidate(filtered, profile, state=state, city=city)
+    ranked_all = recommend_jobs(filtered, skills, limit=MAX_LIMIT)
+    page_num = max(page, 1)
+    start = (page_num - 1) * limit
+    ranked = ranked_all[start : start + limit]
     hint = None
-    if not filtered:
+    if not pool:
         hint = _empty_cache_hint()
-    elif not ranked:
+    elif not filtered and profile is not None:
+        hint = "No listings matched this candidate's location, remote, or visa preferences."
+    elif not filtered:
+        hint = _empty_cache_hint()
+    elif not ranked_all:
         hint = "Listings were found, but none overlapped these skills. Try refresh=true or broader skills."
-    return {
+    payload = {
         "ok": True,
         "count": len(ranked),
+        "total": len(ranked_all),
         "skills": skills,
         "jobs": _with_time_ago(ranked),
+        "pagination": _pagination(len(ranked_all), limit, start),
         "hint": hint,
         **cache_meta(),
     }
+    if candidate_id:
+        payload["candidate_id"] = candidate_id
+    if profile is not None:
+        payload["filters"] = applied_filters(profile, state=state, city=city)
+    return payload
 
 
 def run_spider(keywords: str, location: str, platform: str, city: str = "") -> None:
@@ -1306,11 +1427,51 @@ def recommend_contract():
                     "city": "",
                 },
             },
+            "recommended_roles": {
+                "method": "GET",
+                "path": "/api/recommend/roles",
+                "example": "/api/recommend/roles?skills=Python,FastAPI,AWS&state=All&platform=All&days=30&limit=25&page=1",
+                "query": {
+                    "skills": "Python,FastAPI,AWS",
+                    "state": "All",
+                    "platform": "All",
+                    "days": 30,
+                    "city": "",
+                    "limit": 25,
+                    "page": 1,
+                },
+            },
+            "save_candidate": {
+                "method": "PUT",
+                "path": "/api/candidates/{candidate_id}",
+                "content_type": "application/json",
+                "body": {
+                    "first_name": "Zain",
+                    "last_name": "Mohammed",
+                    "email": "name@company.com",
+                    "city": "San Francisco",
+                    "state": "CA",
+                    "work_history": [
+                        {
+                            "company": "Google",
+                            "job_title": "Software Engineer",
+                            "start_date": "2022-01",
+                            "end_date": "Present",
+                            "description": "Python, FastAPI, AWS",
+                        }
+                    ],
+                    "open_to_remote": "yes",
+                    "willing_to_relocate": "no",
+                    "need_visa_sponsorship": "no",
+                    "authorized_to_work": "yes",
+                },
+            },
             "recommend": {
                 "method": "POST",
                 "path": "/api/recommend",
                 "content_type": "application/json",
                 "body": {
+                    "candidate_id": "123",
                     "skills": ["Python", "FastAPI", "AWS"],
                     "resume_text": "optional raw resume text",
                     "resume": "optional parsed resume JSON",
@@ -1340,11 +1501,184 @@ def recommend_contract():
     }
 
 
+@app.get("/api/recommend/roles", summary="Recommended Roles tab: rank listings by skills")
+def recommend_roles(
+    skills: str = Query(..., description="Comma-separated skills, for example Python,FastAPI,AWS"),
+    state: str = Query("All"),
+    platform: str = Query("All"),
+    days: int = Query(30),
+    city: str = Query(""),
+    e_verified: str = Query("", description="true, false, unknown, or empty for all"),
+    work_model: str = Query("", description="Comma-separated: remote, hybrid, onsite"),
+    job_type: str = Query("", description="Comma-separated: fulltime, contract, parttime, internship"),
+    experience_level: str = Query(""),
+    h1b_sponsorship: str = Query("", description="yes or no"),
+    clearance_required: str = Query("", description="yes or no"),
+    us_citizen_required: str = Query("", description="yes or no"),
+    years: int | None = Query(None, ge=0, le=40),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    page: int = Query(1, ge=1),
+):
+    found = parse_skill_query(skills)
+    if not found:
+        raise HTTPException(
+            status_code=400,
+            detail="Send skills as comma-separated text, for example Python,FastAPI,AWS.",
+        )
+    pool = load_jobs()
+    filtered = filter_jobs(pool, [], state, platform, days, city)
+    wanted = e_verified.strip().lower()
+    wanted = {"yes": "true", "no": "false", "1": "true", "0": "false"}.get(wanted, wanted)
+    if wanted in {"true", "false", "unknown"}:
+        filtered = [job for job in filtered if (job.get("e_verified") or "unknown") == wanted]
+    filtered = apply_listing_filters(
+        filtered,
+        work_model=work_model,
+        job_type=job_type,
+        experience_level=experience_level,
+        h1b_sponsorship=h1b_sponsorship,
+        clearance_required=clearance_required,
+        us_citizen_required=us_citizen_required,
+        years=years,
+    )
+    ranked_all = recommend_jobs(filtered, found, limit=MAX_LIMIT)
+    start = (page - 1) * limit
+    ranked = ranked_all[start : start + limit]
+    hint = None
+    if not pool:
+        hint = _empty_cache_hint()
+    elif not filtered:
+        hint = "No listings matched these filters."
+    elif not ranked_all:
+        hint = "Listings were found, but none overlapped these skills."
+    return {
+        "ok": True,
+        "skills": found,
+        "jobs": _with_time_ago(ranked),
+        "count": len(ranked),
+        "total": len(ranked_all),
+        "limit": limit,
+        "offset": start,
+        "pagination": _pagination(len(ranked_all), limit, start),
+        "hint": hint,
+        **cache_meta(),
+    }
+
+
+def _candidate_skills_or_http(profile: dict, explicit: list[str] | None = None) -> list[str]:
+    found = normalize_skills(explicit or []) or skills_from_profile(profile)
+    if not found:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This candidate has no skills yet. Send skills or resume_text, "
+                "or POST /api/candidates/{candidate_id}/resume."
+            ),
+        )
+    return found
+
+
+def _require_candidate(candidate_id: str) -> tuple[str, dict]:
+    cid = _candidate_id_or_http(candidate_id)
+    profile = _stored_candidate(cid)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No profile saved for candidate_id '{cid}'. PUT /api/candidates/{cid} during registration.",
+        )
+    return cid, profile
+
+
+@app.put("/api/candidates/{candidate_id}", summary="Save the registration profile for a candidate API id")
+@app.post("/api/candidates/{candidate_id}", summary="Save the registration profile for a candidate API id")
+def save_candidate_profile(candidate_id: str, body: CandidateProfile):
+    cid = _candidate_id_or_http(candidate_id)
+    saved = _store_candidate(cid, body.model_dump())
+    return {
+        "ok": True,
+        "candidate_id": cid,
+        "skills": skills_from_profile(saved),
+        "profile": saved,
+    }
+
+
+@app.get("/api/candidates/{candidate_id}", summary="Read a saved registration profile")
+def get_candidate_profile(candidate_id: str):
+    cid, profile = _require_candidate(candidate_id)
+    return {
+        "ok": True,
+        "candidate_id": cid,
+        "skills": skills_from_profile(profile),
+        "profile": profile,
+    }
+
+
+@app.post(
+    "/api/candidates/{candidate_id}/resume",
+    summary="Attach the master resume uploaded during registration",
+)
+async def upload_candidate_resume(
+    candidate_id: str,
+    file: UploadFile = File(..., description="Master resume: PDF, DOCX, or TXT"),
+):
+    cid = _candidate_id_or_http(candidate_id)
+    data = await file.read()
+    parsed = _parse_or_http(data, file.filename or "resume", file.content_type or "")
+    existing = _stored_candidate(cid) or {}
+    merged = {
+        **existing,
+        "skills": normalize_skills((existing.get("skills") or []) + (parsed.get("skills") or [])),
+        "resume_text": parsed.get("raw_text") or existing.get("resume_text") or "",
+    }
+    saved = _store_candidate(cid, merged)
+    return {"ok": True, "candidate_id": cid, "skills": skills_from_profile(saved)}
+
+
+@app.get("/api/recommend/{candidate_id}", summary="Recommend jobs for a saved candidate API id")
+def recommend_for_candidate(
+    candidate_id: str,
+    state: str = Query("All"),
+    platform: str = Query("All"),
+    days: int = Query(30),
+    city: str = Query(""),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    page: int = Query(1, ge=1),
+    refresh: bool = Query(False),
+):
+    cid, profile = _require_candidate(candidate_id)
+    return _recommend_payload(
+        skills=_candidate_skills_or_http(profile),
+        state=state,
+        platform=platform,
+        days=days,
+        city=city,
+        limit=limit,
+        refresh=refresh,
+        page=page,
+        candidate_id=cid,
+        profile=profile,
+    )
+
+
 @app.post(
     "/api/recommend",
-    summary="Recommend job listings from skills or a resume",
+    summary="Recommend job listings from a candidate id, skills, or a resume",
 )
 def recommend_from_json(body: RecommendRequest):
+    if body.candidate_id:
+        cid, profile = _require_candidate(body.candidate_id)
+        skills = _candidate_skills_or_http(profile, body.skills)
+        return _recommend_payload(
+            skills=skills,
+            state=body.state,
+            platform=body.platform,
+            days=body.days,
+            city=body.city,
+            limit=body.limit,
+            refresh=body.refresh,
+            candidate_id=cid,
+            profile=profile,
+        )
     resume_payload = body.resume.model_dump() if body.resume else None
     skills = _skills_from_inputs(body.skills, body.resume_text, resume_payload)
     return _recommend_payload(
@@ -1472,7 +1806,7 @@ def _job_from_cache(job_id: str | None) -> dict | None:
         return None
     wanted = job_id.strip().lower()
     for job in load_jobs():
-        if str(job.get("id") or "").lower() == wanted:
+        if str(job.get("id") or "").lower() == wanted or str(job.get("api_id") or "") == wanted:
             return job
     raise HTTPException(status_code=404, detail=f"No scraped job found for id '{job_id}'.")
 

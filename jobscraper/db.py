@@ -34,6 +34,7 @@ _EVERIFY_INDEX: dict | None = None
 JOBS_TABLE = "jobs"
 RUNS_TABLE = "job_discovery_scrape_runs"
 EVERIFY_TABLE = "job_discovery_everify_employers"
+CANDIDATES_TABLE = "job_discovery_candidates"
 
 CREATE_JOBS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
@@ -83,6 +84,16 @@ CREATE TABLE IF NOT EXISTS {EVERIFY_TABLE} (
   hiring_sites VARCHAR(512) NULL,
   PRIMARY KEY (name_key),
   KEY idx_jd_everify_status (account_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+CREATE_CANDIDATES_SQL = f"""
+CREATE TABLE IF NOT EXISTS {CANDIDATES_TABLE} (
+  candidate_id VARCHAR(64) NOT NULL,
+  profile JSON NOT NULL,
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (candidate_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -293,6 +304,7 @@ def init_db() -> bool:
             cur.execute(CREATE_JOBS_SQL)
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_EVERIFY_SQL)
+            cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         backfill_listing_fields()
         _EVERIFY_INDEX = None
@@ -616,7 +628,7 @@ def _as_e_verified(value) -> str:
 def _job_from_row(row: dict) -> dict:
     posted = row.get("posted_at")
     days = _days_ago_from_iso(posted, int(row.get("days_ago") or 0))
-    return {
+    payload = {
         "id": row.get("id"),
         "title": row.get("title"),
         "company": row.get("company"),
@@ -638,6 +650,9 @@ def _job_from_row(row: dict) -> dict:
         "e_verified": _as_e_verified(row.get("e_verified")),
         "e_verify_name": row.get("e_verify_name"),
     }
+    if row.get("api_id") is not None:
+        payload["api_id"] = int(row["api_id"])
+    return payload
 
 
 def load_jobs() -> list[dict]:
@@ -657,7 +672,8 @@ def load_jobs() -> list[dict]:
                 return []
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
+                f"SELECT id AS api_id, "
+                f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
                 f"days_ago, url, description, job_type, work_model, experience_level, "
                 f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
@@ -686,6 +702,53 @@ def job_count() -> int:
     except Exception:
         close_conn()
         return 0
+
+
+def _profile_from_cell(value) -> dict | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def save_candidate(candidate_id: str, profile: dict) -> None:
+    conn = get_conn()
+    if conn is None:
+        raise RuntimeError("MySQL is not configured")
+    payload = json.dumps(profile, ensure_ascii=False)
+    with conn.cursor() as cur:
+        cur.execute(CREATE_CANDIDATES_SQL)
+        cur.execute(
+            f"INSERT INTO {CANDIDATES_TABLE} (candidate_id, profile, created_at, updated_at) "
+            "VALUES (%s, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)) AS new "
+            "ON DUPLICATE KEY UPDATE profile = new.profile, updated_at = UTC_TIMESTAMP(6)",
+            (candidate_id, payload),
+        )
+
+
+def load_candidate(candidate_id: str) -> dict | None:
+    if not mysql_configured():
+        return None
+    conn = get_conn()
+    if conn is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(CREATE_CANDIDATES_SQL)
+        cur.execute(
+            f"SELECT profile FROM {CANDIDATES_TABLE} WHERE candidate_id = %s",
+            (candidate_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return _profile_from_cell(row.get("profile"))
 
 
 def start_scrape_run(keywords: str, state: str, platform: str) -> int | None:

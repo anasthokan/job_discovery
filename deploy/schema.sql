@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS jobs (
   UNIQUE KEY uk_jobs_source_id (source_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS job_discovery_candidates (
+  candidate_id VARCHAR(64) NOT NULL,
+  profile JSON NOT NULL,
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (candidate_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS job_discovery_scrape_runs (
   id BIGINT NOT NULL AUTO_INCREMENT,
   started_at DATETIME NOT NULL,
