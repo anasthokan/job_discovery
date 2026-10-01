@@ -1057,7 +1057,7 @@ def get_jobs(
     ),
     h1b_sponsorship: str = Query("", description="yes or no"),
     clearance_required: str = Query("", description="yes or no"),
-    us_citizen_required: str = Query("", description="yes, no, or unknown"),
+    us_citizen_required: str = Query("", description="yes or no"),
     years: int | None = Query(
         None,
         ge=0,

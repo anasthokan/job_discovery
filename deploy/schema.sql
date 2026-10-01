@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   years_experience SMALLINT NULL,
   h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
-  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),

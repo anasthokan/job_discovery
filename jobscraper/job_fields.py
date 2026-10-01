@@ -10,7 +10,7 @@ and description are enough to fill the values the dashboard already shows:
   years_experience    minimum years stated in the posting, or null
   h1b_sponsorship     yes | no | unknown
   clearance_required  yes | no | unknown
-  us_citizen_required yes | no | unknown
+  us_citizen_required yes | no
 """
 
 from __future__ import annotations
@@ -336,22 +336,17 @@ def infer_clearance(title: str = "", description: str = "") -> str:
 
 
 def infer_us_citizen(title: str = "", description: str = "") -> str:
-    """yes when the posting demands US citizenship, no when it is open to non-citizens.
+    """yes only when the posting demands US citizenship; otherwise no.
 
-    Secret / Top Secret clearance implies citizenship. Visa sponsorship, green card
-    holders, or US persons (ITAR) mean citizenship itself is not required.
+    Secret / Top Secret clearance implies citizenship. Green card holders, US persons
+    (ITAR), visa sponsorship, or no mention at all mean citizenship is not required.
     """
     text = _clip_text(title, description)
-    stated = _yes_no(text, _CITIZEN_NO, _CITIZEN_YES)
-    if stated == "yes":
+    if _yes_no(text, _CITIZEN_NO, _CITIZEN_YES) == "yes":
         return "yes"
     if infer_clearance(title, description) == "yes" and _CITIZEN_CLEARANCE.search(text):
         return "yes"
-    if stated == "no":
-        return "no"
-    if infer_h1b(title, description) == "yes":
-        return "no"
-    return "unknown"
+    return "no"
 
 
 def infer_listing_fields(
@@ -411,7 +406,7 @@ def apply_listing_filters(
             continue
         if clearance and (job.get("clearance_required") or "unknown") not in clearance:
             continue
-        if citizen and (job.get("us_citizen_required") or "unknown") not in citizen:
+        if citizen and (job.get("us_citizen_required") or "no") not in citizen:
             continue
         if years is not None:
             required = job.get("years_experience")

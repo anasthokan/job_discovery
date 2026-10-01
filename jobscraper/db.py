@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   years_experience SMALLINT NULL,
   h1b_sponsorship VARCHAR(16) NOT NULL DEFAULT 'unknown',
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
-  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
+  us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
@@ -260,10 +260,18 @@ def _ensure_job_columns(cur) -> None:
     if not cur.fetchone():
         cur.execute(
             f"ALTER TABLE {JOBS_TABLE} "
-            "ADD COLUMN us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'unknown'"
+            "ADD COLUMN us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no'"
         )
         # Re-run inference on saved rows so the new column is filled.
         cur.execute(f"UPDATE {JOBS_TABLE} SET listing_inferred = 0")
+    else:
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} ALTER COLUMN us_citizen_required SET DEFAULT 'no'"
+        )
+        cur.execute(
+            f"UPDATE {JOBS_TABLE} SET us_citizen_required = 'no' "
+            "WHERE us_citizen_required NOT IN ('yes', 'no')"
+        )
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -423,7 +431,7 @@ def _listing_fields(job: dict, description: str) -> dict:
         "years_experience": fields["years_experience"],
         "h1b_sponsorship": str(fields["h1b_sponsorship"] or "unknown")[:16],
         "clearance_required": str(fields["clearance_required"] or "unknown")[:16],
-        "us_citizen_required": str(fields["us_citizen_required"] or "unknown")[:16],
+        "us_citizen_required": str(fields["us_citizen_required"] or "no")[:16],
     }
 
 
@@ -625,7 +633,7 @@ def _job_from_row(row: dict) -> dict:
         "years_experience": _years_value(row.get("years_experience")),
         "h1b_sponsorship": row.get("h1b_sponsorship") or "unknown",
         "clearance_required": row.get("clearance_required") or "unknown",
-        "us_citizen_required": row.get("us_citizen_required") or "unknown",
+        "us_citizen_required": "yes" if row.get("us_citizen_required") == "yes" else "no",
         "posted_at": posted,
         "e_verified": _as_e_verified(row.get("e_verified")),
         "e_verify_name": row.get("e_verify_name"),
