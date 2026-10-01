@@ -767,6 +767,11 @@ def load_app_user(candidate_id: str) -> dict | None:
             user_id = int(user["id"])
             profile_row = _profile_row(cur, user_id)
             skills = _user_skill_values(cur, user_id, profile_row.get("profile_id"))
+            skills.extend(_linked_names(cur, user_id, profile_row.get("profile_id")))
+            extra_text = _user_text(cur, user_id, profile_row.get("profile_id"))
+            extra_text = "\n".join(
+                part for part in (extra_text, _resume_text_from_stored_files(cur, user_id, profile_row.get("profile_id"))) if part
+            )
     except Exception:
         log.exception("load_app_user failed for %s", candidate_id)
         close_conn()
@@ -776,6 +781,7 @@ def load_app_user(candidate_id: str) -> dict | None:
         for part in (
             profile_row.get("headline") or "",
             profile_row.get("professional_summary") or "",
+            extra_text,
         )
         if part
     )
@@ -854,6 +860,256 @@ def _user_skill_values(cur, user_id: int, profile_id) -> list[str]:
             if value:
                 found.append(str(value))
     return found
+
+
+def _owner_links(cur, column_like: str | None = None, column_names: tuple[str, ...] = ()) -> list[dict]:
+    filters = ["u.COLUMN_NAME IN ('user_id', 'profile_id', 'candidate_id')"]
+    params: list[str] = []
+    if column_like:
+        filters.append("c.COLUMN_NAME LIKE %s")
+        params.append(column_like)
+    if column_names:
+        marks = ", ".join(["%s"] * len(column_names))
+        filters.append(f"c.COLUMN_NAME IN ({marks})")
+        params.extend(column_names)
+    cur.execute(
+        f"""
+        SELECT c.TABLE_NAME AS table_name,
+               c.COLUMN_NAME AS value_column,
+               u.COLUMN_NAME AS owner_column
+        FROM information_schema.COLUMNS c
+        JOIN information_schema.COLUMNS u
+          ON u.TABLE_SCHEMA = c.TABLE_SCHEMA
+         AND u.TABLE_NAME = c.TABLE_NAME
+         AND u.COLUMN_NAME IN ('user_id', 'profile_id', 'candidate_id')
+        WHERE c.TABLE_SCHEMA = DATABASE()
+          AND {" AND ".join(filters)}
+        """,
+        params,
+    )
+    return list(cur.fetchall() or [])
+
+
+def _rows_for_owner(cur, table: str, column: str, owner: str, key) -> list[dict]:
+    if not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(column) or not _IDENT_RE.fullmatch(owner):
+        return []
+    try:
+        cur.execute(
+            f"SELECT {_quote_ident(column)} AS value FROM {_quote_ident(table)} "
+            f"WHERE {_quote_ident(owner)} = %s LIMIT 30",
+            (key,),
+        )
+        return list(cur.fetchall() or [])
+    except Exception:
+        log.exception("lookup failed on %s.%s", table, column)
+        return []
+
+
+def _linked_names(cur, user_id: int, profile_id) -> list[str]:
+    """Resolve skill_id / target_role_id links to their display names."""
+    catalogs = []
+    try:
+        cur.execute(
+            """
+            SELECT TABLE_NAME AS table_name, COLUMN_NAME AS name_column
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME LIKE %s
+              AND COLUMN_NAME IN ('name', 'title', 'label', 'skill_name')
+            """,
+            ("%skill%",),
+        )
+        catalogs.extend(cur.fetchall() or [])
+        cur.execute(
+            """
+            SELECT TABLE_NAME AS table_name, COLUMN_NAME AS name_column
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME LIKE %s
+              AND COLUMN_NAME IN ('name', 'title', 'label')
+            """,
+            ("%target_role%",),
+        )
+        catalogs.extend(cur.fetchall() or [])
+    except Exception:
+        log.exception("catalog lookup failed")
+        return []
+    found: list[str] = []
+    try:
+        links = _owner_links(cur, column_like="%id")
+    except Exception:
+        log.exception("link lookup failed")
+        return found
+    for link in links:
+        owner = link.get("owner_column")
+        key = user_id if owner == "user_id" else profile_id
+        if key is None or owner == "candidate_id":
+            key = user_id if owner == "candidate_id" else key
+        fk = str(link.get("value_column") or "")
+        if not any(token in fk for token in ("skill", "role")):
+            continue
+        table = str(link.get("table_name") or "")
+        for catalog in catalogs:
+            cat_table = str(catalog.get("table_name") or "")
+            cat_name = str(catalog.get("name_column") or "")
+            if cat_table == table or not _IDENT_RE.fullmatch(cat_table) or not _IDENT_RE.fullmatch(cat_name):
+                continue
+            if not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(fk) or owner not in {"user_id", "profile_id", "candidate_id"}:
+                continue
+            if key is None:
+                continue
+            try:
+                cur.execute(
+                    f"SELECT cat.{_quote_ident(cat_name)} AS skill "
+                    f"FROM {_quote_ident(table)} link "
+                    f"JOIN {_quote_ident(cat_table)} cat ON cat.id = link.{_quote_ident(fk)} "
+                    f"WHERE link.{_quote_ident(owner)} = %s LIMIT 40",
+                    (key,),
+                )
+                for row in cur.fetchall() or []:
+                    if row.get("skill"):
+                        found.append(str(row["skill"]))
+            except Exception:
+                continue
+    return found
+
+
+_TEXT_COLUMNS = (
+    "headline",
+    "professional_summary",
+    "summary",
+    "description",
+    "answer",
+    "job_title",
+    "title",
+    "resume_text",
+    "extracted_text",
+    "content",
+    "body",
+    "degree",
+    "field_of_study",
+)
+
+
+def _user_text(cur, user_id: int, profile_id) -> str:
+    chunks: list[str] = []
+    try:
+        links = _owner_links(cur, column_names=_TEXT_COLUMNS)
+    except Exception:
+        log.exception("profile text lookup failed")
+        return ""
+    for link in links:
+        owner = str(link.get("owner_column") or "")
+        key = {"user_id": user_id, "profile_id": profile_id, "candidate_id": user_id}.get(owner)
+        if key is None:
+            continue
+        for row in _rows_for_owner(
+            cur,
+            str(link.get("table_name") or ""),
+            str(link.get("value_column") or ""),
+            owner,
+            key,
+        ):
+            value = row.get("value")
+            if isinstance(value, str) and value.strip():
+                chunks.append(value.strip()[:4000])
+    return "\n".join(chunks)[:20000]
+
+
+def _resume_text_from_stored_files(cur, user_id: int, profile_id) -> str:
+    """Parse a resume file or blob saved on the user or profile row."""
+    try:
+        from jobscraper.resume_parser import parse_resume_bytes
+    except Exception:
+        return ""
+    texts: list[str] = []
+    try:
+        links = _owner_links(
+            cur,
+            column_names=("file", "file_path", "path", "resume", "document", "upload", "attachment"),
+        )
+    except Exception:
+        log.exception("resume path lookup failed")
+        links = []
+    for link in links:
+        owner = str(link.get("owner_column") or "")
+        key = {"user_id": user_id, "profile_id": profile_id, "candidate_id": user_id}.get(owner)
+        if key is None:
+            continue
+        for row in _rows_for_owner(
+            cur,
+            str(link.get("table_name") or ""),
+            str(link.get("value_column") or ""),
+            owner,
+            key,
+        ):
+            text = _text_from_resume_value(row.get("value"), parse_resume_bytes)
+            if text:
+                texts.append(text)
+    if texts:
+        return "\n".join(texts)[:20000]
+    try:
+        cur.execute(
+            """
+            SELECT c.TABLE_NAME AS table_name,
+                   c.COLUMN_NAME AS value_column,
+                   u.COLUMN_NAME AS owner_column
+            FROM information_schema.COLUMNS c
+            JOIN information_schema.COLUMNS u
+              ON u.TABLE_SCHEMA = c.TABLE_SCHEMA
+             AND u.TABLE_NAME = c.TABLE_NAME
+             AND u.COLUMN_NAME IN ('user_id', 'profile_id')
+            WHERE c.TABLE_SCHEMA = DATABASE()
+              AND c.DATA_TYPE IN ('blob', 'mediumblob', 'longblob')
+              AND (c.COLUMN_NAME LIKE %s OR c.COLUMN_NAME LIKE %s OR c.COLUMN_NAME LIKE %s)
+            """,
+            ("%resume%", "%file%", "%document%"),
+        )
+        blobs = list(cur.fetchall() or [])
+    except Exception:
+        log.exception("resume blob lookup failed")
+        return ""
+    for link in blobs:
+        owner = str(link.get("owner_column") or "")
+        key = user_id if owner == "user_id" else profile_id
+        if key is None:
+            continue
+        table = str(link.get("table_name") or "")
+        column = str(link.get("value_column") or "")
+        if not _IDENT_RE.fullmatch(table) or not _IDENT_RE.fullmatch(column) or not _IDENT_RE.fullmatch(owner):
+            continue
+        try:
+            cur.execute(
+                f"SELECT {_quote_ident(column)} AS value FROM {_quote_ident(table)} "
+                f"WHERE {_quote_ident(owner)} = %s LIMIT 1",
+                (key,),
+            )
+            row = cur.fetchone() or {}
+        except Exception:
+            continue
+        text = _text_from_resume_value(row.get("value"), parse_resume_bytes)
+        if text:
+            texts.append(text)
+    return "\n".join(texts)[:20000]
+
+
+def _text_from_resume_value(value, parse_resume_bytes) -> str:
+    if isinstance(value, str):
+        path = Path(value.strip())
+        if path.suffix.lower() in {".pdf", ".docx", ".txt"} and path.is_file():
+            try:
+                parsed = parse_resume_bytes(path.read_bytes(), filename=path.name)
+            except Exception:
+                return ""
+            return str(parsed.get("raw_text") or "")[:20000]
+        return ""
+    if isinstance(value, (bytes, bytearray)) and len(value) > 100:
+        try:
+            parsed = parse_resume_bytes(bytes(value), filename="resume.pdf")
+        except Exception:
+            return ""
+        return str(parsed.get("raw_text") or "")[:20000]
+    return ""
 
 
 def load_candidate(candidate_id: str) -> dict | None:
