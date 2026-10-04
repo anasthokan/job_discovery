@@ -59,6 +59,19 @@ def _source_json(value) -> str:
         return "{}"
 
 
+def _feed_item_raw(item) -> dict:
+    """Every element on an RSS item, including fields we do not map onto the jobs API."""
+    raw = {}
+    for child in item.xpath("./*"):
+        name = (child.xpath("name()").get() or "").split(":")[-1].strip()
+        if not name:
+            continue
+        text = " ".join(part.strip() for part in child.xpath(".//text()").getall() if part.strip())
+        if text:
+            raw[name] = text
+    return raw
+
+
 def strip_html(value) -> str:
     text = HTML_RE.sub(" ", str(value or ""))
     return WS_RE.sub(" ", text).strip()
@@ -460,8 +473,8 @@ class JobsSpider(scrapy.Spider):
         description = strip_html(extra)
         if description:
             item["description"] = description[:60000]
-        source = raw if raw is not None else {**fields, "description": description}
-        item["raw_description"] = _source_json(source)
+        if raw is not None:
+            item["raw_description"] = _source_json(raw)
         inferred = infer_listing_fields(
             title=fields.get("title") or "",
             location=fields.get("location") or "",
@@ -631,6 +644,7 @@ class JobsSpider(scrapy.Spider):
                 url=link,
                 posted_at=posted,
                 search_text=desc,
+                raw=_feed_item_raw(item),
             )
 
     def parse_remoteco(self, response):
@@ -655,6 +669,7 @@ class JobsSpider(scrapy.Spider):
                 url=link,
                 posted_at=posted,
                 search_text=desc,
+                raw=_feed_item_raw(item),
             )
 
     def parse_greenhouse(self, response, company=""):

@@ -140,7 +140,7 @@ ON DUPLICATE KEY UPDATE
   days_ago = new.days_ago,
   url = new.url,
   description = new.description,
-  raw_description = new.raw_description,
+  raw_description = COALESCE(new.raw_description, {JOBS_TABLE}.raw_description),
   posted_at = new.posted_at,
   job_type = new.job_type,
   work_model = new.work_model,
@@ -312,7 +312,7 @@ def init_db() -> bool:
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         backfill_listing_fields()
-        backfill_raw_descriptions()
+        clear_copied_api_raw_descriptions()
         _EVERIFY_INDEX = None
         from jobscraper.everify import load_rows_from_csv
 
@@ -382,8 +382,12 @@ def backfill_listing_fields() -> int:
         return 0
 
 
-def backfill_raw_descriptions() -> int:
-    """Fill jobs.raw_description for rows saved before the source JSON was stored."""
+def clear_copied_api_raw_descriptions() -> int:
+    """Remove raw_description values that were copied from our own jobs API fields.
+
+    The real value is the source payload captured while scraping. Those copies
+    are marked by api_id, which source boards do not send.
+    """
     if not mysql_configured():
         return 0
     conn = get_conn()
@@ -393,32 +397,18 @@ def backfill_raw_descriptions() -> int:
         with _LOCK:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT id AS api_id, "
-                    f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
-                    f"title, company, skills, state, location, platform, "
-                    f"days_ago, url, description, job_type, work_model, experience_level, "
-                    f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
-                    f"posted_at, e_verified, e_verify_name "
-                    f"FROM {JOBS_TABLE} "
-                    f"WHERE raw_description IS NULL OR TRIM(CAST(raw_description AS CHAR)) = ''"
+                    f"UPDATE {JOBS_TABLE} SET raw_description = NULL "
+                    f"WHERE raw_description IS NOT NULL "
+                    f"AND CAST(raw_description AS CHAR) LIKE %s",
+                    ('%"api_id"%',),
                 )
-                rows = cur.fetchall() or []
-                if not rows:
-                    return 0
-                payload = [
-                    (json.dumps(_json_ready(_job_payload(row, include_raw=False)), ensure_ascii=False), row["api_id"])
-                    for row in rows
-                ]
-                for start in range(0, len(payload), 200):
-                    cur.executemany(
-                        f"UPDATE {JOBS_TABLE} SET raw_description = %s WHERE id = %s",
-                        payload[start : start + 200],
-                    )
-        log.info("Backfilled raw_description on %s jobs", len(payload))
-        return len(payload)
+                cleared = int(cur.rowcount or 0)
+        if cleared:
+            log.info("Cleared copied API fields from raw_description on %s jobs", cleared)
+        return cleared
     except Exception:
         close_conn()
-        log.exception("raw_description backfill failed")
+        log.exception("raw_description cleanup failed")
         return 0
 
 
@@ -517,25 +507,71 @@ def _json_ready(value):
     return str(value)
 
 
-def _raw_description_json(job: dict) -> str:
-    """JSON text of the source job object, stored in jobs.raw_description."""
-    raw = job.get("raw_description")
+_API_JOB_KEYS = {
+    "id",
+    "title",
+    "company",
+    "skills",
+    "state",
+    "location",
+    "platform",
+    "daysAgo",
+    "url",
+    "description",
+    "job_type",
+    "work_model",
+    "experience_level",
+    "years_experience",
+    "h1b_sponsorship",
+    "clearance_required",
+    "us_citizen_required",
+    "posted_at",
+    "e_verified",
+    "e_verify_name",
+    "api_id",
+    "search_text",
+}
+
+
+def _is_copied_api_job(value: dict) -> bool:
+    """True when this object is our jobs API row, not a scraped source payload."""
+    if "api_id" in value:
+        return True
+    copied = {"e_verified", "e_verify_name", "daysAgo", "us_citizen_required"}
+    return copied.issubset(value) and set(value).issubset(_API_JOB_KEYS)
+
+
+def _raw_description_json(job: dict) -> str | None:
+    """JSON text of the scraped source job. Our own API fields are not stored."""
+    raw = job.get("raw")
     if raw is None or raw == "":
-        raw = job.get("raw")
+        raw = job.get("raw_description")
     if isinstance(raw, str):
         text = raw.strip()
-        if text:
-            return text[:500000]
-    if not isinstance(raw, (dict, list)):
-        raw = {
-            key: value
-            for key, value in job.items()
-            if key not in {"raw", "raw_description", "search_text"}
-        }
-    try:
-        return json.dumps(_json_ready(raw), ensure_ascii=False)[:500000]
-    except (TypeError, ValueError):
-        return "{}"
+        if not text or text in {"{}", "[]", "null"}:
+            return None
+        if text[:1] in "{[":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                return text[:500000]
+            return _raw_description_json({"raw": parsed})
+        return text[:500000]
+    if isinstance(raw, dict):
+        if not raw or _is_copied_api_job(raw):
+            return None
+        try:
+            return json.dumps(_json_ready(raw), ensure_ascii=False)[:500000]
+        except (TypeError, ValueError):
+            return None
+    if isinstance(raw, list):
+        if not raw:
+            return None
+        try:
+            return json.dumps(_json_ready(raw), ensure_ascii=False)[:500000]
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _years_value(value) -> int | None:
