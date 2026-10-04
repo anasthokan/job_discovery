@@ -325,6 +325,7 @@ def init_db() -> bool:
             replace_everify_employers(rows)
             enrich_jobs_everify()
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
+        start_dice_description_backfill()
         return True
     except Exception:
         close_conn()
@@ -414,6 +415,93 @@ def clear_copied_api_raw_descriptions() -> int:
         close_conn()
         log.exception("raw_description cleanup failed")
         return 0
+
+
+_DICE_BACKFILL_STARTED = False
+
+
+def start_dice_description_backfill() -> None:
+    """Fill title-only descriptions from each board's own posting page."""
+    global _DICE_BACKFILL_STARTED
+    if _DICE_BACKFILL_STARTED or not mysql_configured():
+        return
+    _DICE_BACKFILL_STARTED = True
+    threading.Thread(
+        target=_fill_short_dice_descriptions,
+        name="posting-descriptions",
+        daemon=True,
+    ).start()
+
+
+def _fill_short_dice_descriptions() -> None:
+    import time
+    import urllib.error
+
+    from jobscraper.agent_reach import fetch_posting_paragraph
+
+    conn = get_conn()
+    if conn is None:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, url, title, platform FROM {JOBS_TABLE} "
+                f"WHERE platform IN ('Dice', 'LinkedIn', 'Y Combinator', 'SmartRecruiters') "
+                f"AND CHAR_LENGTH(description) < 120 AND TRIM(url) <> ''"
+            )
+            rows = list(cur.fetchall() or [])
+    except Exception:
+        close_conn()
+        log.exception("Could not list short job descriptions")
+        return
+    if not rows:
+        return
+    log.info("Filling %s short descriptions from posting pages", len(rows))
+    filled = 0
+    failures = 0
+    for row in rows:
+        time.sleep(0.25)
+        url = str(row.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            text = fetch_posting_paragraph(row.get("platform") or "", url)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {404, 410}:
+                failures += 1
+            if failures >= 20:
+                log.warning("Stopped description fill after repeated request failures")
+                break
+            continue
+        except Exception:
+            failures += 1
+            if failures >= 20:
+                log.warning("Stopped description fill after repeated request failures")
+                break
+            continue
+        failures = 0
+        if not text:
+            continue
+        payload = json.dumps({"url": url, "jobDescription": text}, ensure_ascii=False)
+        try:
+            with _LOCK:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {JOBS_TABLE} SET description = %s, "
+                        f"raw_description = IF("
+                        f"raw_description IS NULL OR CAST(raw_description AS CHAR) LIKE %s, "
+                        f"%s, raw_description) "
+                        f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
+                        (text, '%"api_id"%', payload, row["id"], text),
+                    )
+            filled += 1
+        except Exception:
+            close_conn()
+            conn = get_conn()
+            if conn is None:
+                break
+            log.exception("Job description update failed")
+    log.info("Filled %s descriptions from posting pages", filled)
 
 
 def _as_skills_json(value) -> str:
@@ -594,14 +682,7 @@ def _row_from_item(job: dict) -> dict | None:
     if not source_id or not title or not company:
         return None
     skills = _as_skills_json(job.get("skills"))
-    description = str(job.get("description") or job.get("search_text") or "").strip()
-    if len(description) < 40:
-        try:
-            skill_names = json.loads(skills)
-        except json.JSONDecodeError:
-            skill_names = []
-        description = ", ".join(skill_names) if skill_names else title
-    description = description[:60000]
+    description = str(job.get("description") or job.get("search_text") or "").strip()[:60000]
     try:
         days_ago = int(job.get("daysAgo") or 0)
     except (TypeError, ValueError):

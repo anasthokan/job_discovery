@@ -8,16 +8,22 @@ from urllib.parse import urlencode
 import scrapy
 
 from jobscraper.agent_reach import (
+    DICE_HEADERS,
     JINA_HEADERS,
+    dice_description_from_html,
     dice_search_urls,
+    linkedin_description_from_html,
+    smartrecruiters_description,
+    yc_description_from_html,
     hn_comments_url,
     hn_latest_thread_url,
     is_antibot,
     linkedin_search_urls,
-    parse_dice_markdown,
+    parse_dice_search_html,
     parse_hn_comment,
     parse_linkedin_markdown,
     parse_yc_markdown,
+    posting_paragraph,
     yc_jobs_url,
 )
 from jobscraper.boards import (
@@ -392,7 +398,13 @@ class JobsSpider(scrapy.Spider):
                 if dice_pages:
                     urls = urls[:dice_pages]
                 for url in urls:
-                    yield self._jina_request(url, self.parse_dice)
+                    yield scrapy.Request(
+                        url,
+                        callback=self.parse_dice,
+                        errback=self.errback,
+                        headers=DICE_HEADERS,
+                        meta={"download_timeout": 40},
+                    )
 
         if self._wanted(selected, "Y Combinator"):
             yield self._jina_request(yc_jobs_url(), self.parse_yc)
@@ -762,18 +774,25 @@ class JobsSpider(scrapy.Spider):
             url = row.get("ref") or (f"https://jobs.smartrecruiters.com/{company}/{ident}" if ident else "")
             fn = row.get("function")
             skills = as_list(fn.get("label") if isinstance(fn, dict) else fn)
-            yield from self._emit(
-                id=f"smartrecruiters-{company}-{ident}",
-                title=row.get("name"),
-                company=company,
-                skills=skills,
-                state=parse_state(location),
-                location=location,
-                platform="SmartRecruiters",
-                daysAgo=days_ago(posted),
-                url=url,
-                posted_at=str(posted),
-                raw=row,
+            if not ident:
+                continue
+            yield scrapy.Request(
+                f"https://api.smartrecruiters.com/v1/companies/{company}/postings/{ident}",
+                callback=self.parse_smartrecruiters_detail,
+                errback=self.errback,
+                headers={"Accept": "application/json"},
+                cb_kwargs={
+                    "job": {
+                        "id": f"smartrecruiters-{company}-{ident}",
+                        "title": row.get("name"),
+                        "company": company,
+                        "skills": skills,
+                        "location": location,
+                        "url": url,
+                        "posted_at": str(posted),
+                        "raw": row,
+                    }
+                },
             )
 
     def parse_workable(self, response, company=""):
@@ -816,57 +835,150 @@ class JobsSpider(scrapy.Spider):
             self.logger.warning("LinkedIn Jina Reader returned an antibot page")
             return
         for job in parse_linkedin_markdown(response.text):
-            yield from self._emit(
-                id=job["id"],
-                title=job["title"],
-                company=job["company"],
-                skills=[],
-                state=parse_state(job["location"]),
-                location=job["location"],
-                platform=job["platform"],
-                daysAgo=job["daysAgo"],
-                url=job["url"],
-                posted_at=job["posted_at"],
-                raw=job,
+            match = re.search(r"(\d{6,})", job.get("url") or job.get("id") or "")
+            if not match:
+                continue
+            yield scrapy.Request(
+                f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{match.group(1)}",
+                callback=self.parse_linkedin_detail,
+                errback=self.errback,
+                headers=DICE_HEADERS,
+                cb_kwargs={"job": job},
+                meta={"download_timeout": 25},
             )
+
+    def _dice_items(self, job, description):
+        source = dict(job.get("raw") or {})
+        if description:
+            source["jobDescription"] = description
+        yield from self._emit(
+            id=job["id"],
+            title=job["title"],
+            company=job["company"],
+            skills=[],
+            state=parse_state(job.get("location") or ""),
+            location=job.get("location") or "",
+            platform="Dice",
+            daysAgo=days_ago(job.get("posted_at")),
+            url=job["url"],
+            posted_at=job.get("posted_at") or "",
+            job_type=job.get("job_type") or "",
+            search_text=description,
+            raw=source or None,
+        )
 
     def parse_dice(self, response):
         if is_antibot(response.text):
-            self.logger.warning("Dice Jina Reader returned an antibot page")
+            self.logger.warning("Dice search returned an antibot page")
             return
-        for job in parse_dice_markdown(response.text):
-            yield from self._emit(
-                id=job["id"],
-                title=job["title"],
-                company=job["company"],
-                skills=[],
-                state=parse_state(job["location"]),
-                location=job["location"],
-                platform=job["platform"],
-                daysAgo=job["daysAgo"],
-                url=job["url"],
-                posted_at=job["posted_at"],
-                raw=job,
+        for job in parse_dice_search_html(response.text):
+            yield scrapy.Request(
+                job["url"],
+                callback=self.parse_dice_detail,
+                errback=self.errback_dice,
+                headers=DICE_HEADERS,
+                cb_kwargs={"job": job},
+                meta={"download_timeout": 25},
             )
+
+    def parse_dice_detail(self, response, job):
+        if is_antibot(response.text):
+            description = posting_paragraph(job.get("summary") or "", job.get("title") or "")
+        else:
+            body = dice_description_from_html(response.text)
+            summary = job.get("summary") or ""
+            description = body if len(body) >= len(summary) else summary
+            description = posting_paragraph(description, job.get("title") or "")
+        yield from self._dice_items(job, description)
+
+    def errback_dice(self, failure):
+        request = getattr(failure, "request", None)
+        job = (getattr(request, "cb_kwargs", None) or {}).get("job") if request else None
+        if not job:
+            return
+        description = posting_paragraph(job.get("summary") or "", job.get("title") or "")
+        yield from self._dice_items(job, description)
+
+    def parse_smartrecruiters_detail(self, response, job):
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+        description = smartrecruiters_description(payload)
+        source = dict(job.get("raw") or {})
+        source["posting"] = payload
+        if description:
+            source["jobDescription"] = description
+        yield from self._emit(
+            id=job["id"],
+            title=job["title"],
+            company=job["company"],
+            skills=job.get("skills") or [],
+            state=parse_state(job.get("location") or ""),
+            location=job.get("location") or "",
+            platform="SmartRecruiters",
+            daysAgo=days_ago(job.get("posted_at")),
+            url=job["url"],
+            posted_at=job.get("posted_at") or "",
+            search_text=description,
+            raw=source,
+        )
+
+    def parse_linkedin_detail(self, response, job):
+        description = "" if is_antibot(response.text) else linkedin_description_from_html(response.text)
+        source = dict(job)
+        if description:
+            source["jobDescription"] = description
+        yield from self._emit(
+            id=job["id"],
+            title=job["title"],
+            company=job["company"],
+            skills=[],
+            state=parse_state(job.get("location") or ""),
+            location=job.get("location") or "",
+            platform=job.get("platform") or "LinkedIn",
+            daysAgo=job.get("daysAgo") or 0,
+            url=job["url"],
+            posted_at=job.get("posted_at") or "",
+            search_text=description,
+            raw=source,
+        )
 
     def parse_yc(self, response):
         if is_antibot(response.text):
             self.logger.warning("Y Combinator Jina Reader returned an antibot page")
             return
         for job in parse_yc_markdown(response.text):
-            yield from self._emit(
-                id=job["id"],
-                title=job["title"],
-                company=job["company"],
-                skills=[],
-                state=parse_state(job["location"]),
-                location=job["location"],
-                platform=job["platform"],
-                daysAgo=job["daysAgo"],
-                url=job["url"],
-                posted_at=job["posted_at"],
-                raw=job,
+            if not job.get("url"):
+                continue
+            yield scrapy.Request(
+                job["url"],
+                callback=self.parse_yc_detail,
+                errback=self.errback,
+                headers=DICE_HEADERS,
+                cb_kwargs={"job": job},
+                meta={"download_timeout": 25},
             )
+
+    def parse_yc_detail(self, response, job):
+        description = "" if is_antibot(response.text) else yc_description_from_html(response.text)
+        source = dict(job)
+        if description:
+            source["jobDescription"] = description
+        yield from self._emit(
+            id=job["id"],
+            title=job["title"],
+            company=job["company"],
+            skills=[],
+            state=parse_state(job.get("location") or ""),
+            location=job.get("location") or "",
+            platform=job.get("platform") or "Y Combinator",
+            daysAgo=job.get("daysAgo") or 0,
+            url=job["url"],
+            posted_at=job.get("posted_at") or "",
+            search_text=description,
+            raw=source,
+        )
 
     def parse_hn_thread(self, response):
         payload = self._json(response)

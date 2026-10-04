@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from datetime import datetime, timezone
 from urllib.parse import unquote, urlencode, urlparse, urlunparse
@@ -11,6 +12,13 @@ JINA_PREFIX = "https://r.jina.ai/"
 JINA_HEADERS = {
     "Accept": "text/plain",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+}
+DICE_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
 }
 
 LINKEDIN_JOB_RE = re.compile(
@@ -135,7 +143,7 @@ def dice_search_urls(query: str, location: str) -> list[str]:
         }
         if location and location.lower() not in {"united states", "remote"}:
             params["locationName"] = location
-        urls.append(jina_url("https://www.dice.com/jobs?" + urlencode(params)))
+        urls.append("https://www.dice.com/jobs?" + urlencode(params))
     return urls
 
 
@@ -225,6 +233,182 @@ def parse_linkedin_markdown(text: str) -> list[dict]:
             }
         )
     return jobs
+
+
+def posting_paragraph(text: str, title: str = "") -> str:
+    """Real posting text. A title or one short line is not a description."""
+    body = re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+    heading = re.sub(r"\s+", " ", title or "").strip()
+    if len(body) < 120:
+        return ""
+    if heading and body.lower() == heading.lower():
+        return ""
+    return body[:60000]
+
+
+def parse_dice_search_html(page: str) -> list[dict]:
+    """Jobs embedded in the Dice search page, including the posting summary."""
+    start = (page or "").find("jobList")
+    if start < 0:
+        return []
+    segment = page[start : start + 500000].replace('\\"', '"').replace("\\\\", "\\")
+    data_at = segment.find('{"data":')
+    if data_at < 0:
+        return []
+    blob = segment[data_at:]
+    depth = 0
+    end = None
+    for index, char in enumerate(blob):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    if not end:
+        return []
+    try:
+        payload = json.loads(blob[:end])
+    except json.JSONDecodeError:
+        return []
+    jobs = []
+    for row in payload.get("data") or []:
+        if not isinstance(row, dict):
+            continue
+        guid = str(row.get("guid") or "").strip()
+        url = str(row.get("detailsPageUrl") or "").strip()
+        if not url and guid:
+            url = f"https://www.dice.com/job-detail/{guid}"
+        title = str(row.get("title") or "").strip()
+        if not title or not url:
+            continue
+        place = row.get("jobLocation") if isinstance(row.get("jobLocation"), dict) else {}
+        location = str((place or {}).get("displayName") or "").strip()
+        if row.get("isRemote") and "remote" not in location.lower():
+            location = f"{location}, Remote" if location else "Remote"
+        jobs.append(
+            {
+                "id": f"dice-{guid or url}",
+                "title": title,
+                "company": str(row.get("companyName") or "Unknown").strip() or "Unknown",
+                "location": location or "United States",
+                "url": url,
+                "posted_at": str(row.get("postedDate") or ""),
+                "summary": str(row.get("summary") or ""),
+                "job_type": str(row.get("employmentType") or ""),
+                "raw": row,
+            }
+        )
+    return jobs
+
+
+def dice_description_from_html(page: str) -> str:
+    """Full posting body from a Dice job detail page."""
+    marker = "jobDescription\">"
+    start_at = (page or "").find(marker)
+    if start_at < 0:
+        return ""
+    start = start_at + len(marker)
+    depth = 1
+    index = start
+    text = page or ""
+    while index < len(text) and depth:
+        if text.startswith("<div", index):
+            depth += 1
+            index = text.find(">", index)
+            index = len(text) if index < 0 else index + 1
+            continue
+        if text.startswith("</div>", index):
+            depth -= 1
+            if depth == 0:
+                plain = re.sub(r"<[^>]+>", " ", text[start:index])
+                return posting_paragraph(plain)
+            index += 6
+            continue
+        index += 1
+    return ""
+
+
+def linkedin_description_from_html(page: str) -> str:
+    match = re.search(
+        r'class="show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>',
+        page or "",
+        re.S,
+    )
+    if not match:
+        return ""
+    plain = re.sub(r"<[^>]+>", " ", match.group(1))
+    return posting_paragraph(plain)
+
+
+def yc_description_from_html(page: str) -> str:
+    match = re.search(
+        r"descriptionHtml&quot;:&quot;(.*?)&quot;,&quot;",
+        page or "",
+        re.S,
+    )
+    if not match:
+        return ""
+    raw = html.unescape(match.group(1))
+    try:
+        raw = raw.encode("utf-8").decode("unicode_escape")
+    except UnicodeError:
+        pass
+    plain = re.sub(r"<[^>]+>", " ", raw)
+    return posting_paragraph(plain)
+
+
+def smartrecruiters_description(payload: dict) -> str:
+    sections = ((payload or {}).get("jobAd") or {}).get("sections") or {}
+    parts = []
+    for key in ("companyDescription", "jobDescription", "qualifications", "additionalInformation"):
+        text = (sections.get(key) or {}).get("text") or ""
+        plain = re.sub(r"<[^>]+>", " ", str(text))
+        if plain.strip():
+            parts.append(plain)
+    return posting_paragraph(" ".join(parts))
+
+
+def fetch_posting_paragraph(platform: str, url: str) -> str:
+    """Load the source posting and return its paragraph, never a made-up line."""
+    import urllib.request
+
+    target = (url or "").strip()
+    if not target:
+        return ""
+    name = platform or ""
+    headers = dict(DICE_HEADERS)
+    if name == "LinkedIn":
+        match = re.search(r"(\d{6,})", target)
+        if not match:
+            return ""
+        target = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{match.group(1)}"
+    elif name == "SmartRecruiters" and "api.smartrecruiters.com" not in target:
+        match = re.search(r"smartrecruiters\.com/([^/]+)/([^/?#]+)", target)
+        if not match:
+            return ""
+        target = (
+            "https://api.smartrecruiters.com/v1/companies/"
+            f"{match.group(1)}/postings/{match.group(2)}"
+        )
+        headers["Accept"] = "application/json"
+    request = urllib.request.Request(target, headers=headers)
+    with urllib.request.urlopen(request, timeout=25) as response:
+        page = response.read().decode("utf-8", "ignore")
+    if name == "Dice":
+        return dice_description_from_html(page)
+    if name == "LinkedIn":
+        return linkedin_description_from_html(page)
+    if name == "Y Combinator":
+        return yc_description_from_html(page)
+    if name == "SmartRecruiters":
+        try:
+            payload = json.loads(page)
+        except json.JSONDecodeError:
+            return ""
+        return smartrecruiters_description(payload)
+    return ""
 
 
 def parse_dice_markdown(text: str) -> list[dict]:
