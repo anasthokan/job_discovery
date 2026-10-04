@@ -159,35 +159,72 @@ ABBREV_TO_STATE = {abbrev: state for state, abbrev in STATE_ABBREV.items()}
 
 US_STATE_VALUES = set(STATE_ABBREV.keys()) | {"Multiple US", "United States", "Remote"}
 
-_FOREIGN_HINTS = (
-    "india", "indian", "bengaluru", "bangalore", "hyderabad", "mumbai", "pune",
-    "chennai", "gurgaon", "gurugram", "noida", "kolkata", "kochi", "ahmedabad",
-    "united kingdom", "uk", "england", "scotland", "wales", "london", "manchester",
-    "germany", "berlin", "munich", "france", "paris",
-    "canada", "toronto", "vancouver", "montreal",
-    "australia", "sydney", "melbourne",
-    "netherlands", "amsterdam", "spain", "madrid", "barcelona",
-    "portugal", "lisbon", "italy", "rome", "milan",
-    "poland", "warsaw", "brazil", "mexico", "singapore",
-    "japan", "tokyo", "china", "shanghai", "beijing",
-    "philippines", "manila", "pakistan", "uae", "dubai", "ireland", "dublin",
-    "sweden", "stockholm", "norway", "denmark", "finland", "switzerland", "zurich",
-    "austria", "vienna", "croatia", "hungary", "romania", "ukraine",
-    "south africa", "nigeria", "israel", "tel aviv",
-    "south korea", "seoul", "taiwan", "vietnam", "indonesia", "malaysia",
-    "thailand", "new zealand", "belgium", "czech", "greece",
-    "europe", "emea", "latam", "apac", "asia", "africa",
-    "argentina", "colombia", "chile", "peru", "tbilisi",
-    "kenya", "ghana", "egypt", "turkey", "istanbul",
+_FOREIGN_COUNTRIES = (
+    "india", "united kingdom", "uk", "england", "scotland", "wales",
+    "germany", "france", "canada", "australia", "netherlands", "spain",
+    "portugal", "italy", "poland", "brazil", "mexico", "singapore",
+    "japan", "china", "philippines", "pakistan", "uae",
+    "united arab emirates", "ireland", "sweden", "norway", "denmark",
+    "finland", "switzerland", "austria", "croatia", "hungary", "romania",
+    "ukraine", "south africa", "nigeria", "israel", "south korea", "taiwan",
+    "vietnam", "indonesia", "malaysia", "thailand", "new zealand", "belgium",
+    "czech", "greece", "argentina", "colombia", "chile", "peru", "kenya",
+    "ghana", "egypt", "turkey", "hong kong", "saudi arabia", "qatar",
+    "bangladesh", "sri lanka", "nepal", "russia",
 )
-_FOREIGN_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(hint) for hint in _FOREIGN_HINTS) + r")\b",
+_FOREIGN_CITIES = (
+    "bengaluru", "bangalore", "hyderabad", "mumbai", "pune", "chennai",
+    "gurgaon", "gurugram", "noida", "kolkata", "kochi", "ahmedabad",
+    "london", "manchester", "berlin", "munich", "paris", "toronto",
+    "vancouver", "montreal", "ottawa", "calgary", "ontario", "quebec",
+    "sydney", "melbourne", "brisbane", "amsterdam", "madrid", "barcelona",
+    "lisbon", "rome", "milan", "warsaw", "tokyo", "shanghai", "beijing",
+    "manila", "dubai", "dublin", "stockholm", "zurich", "vienna", "seoul",
+    "tbilisi", "istanbul", "auckland", "prague", "krakow", "kyiv", "kiev",
+    "lagos", "nairobi", "tel aviv",
+)
+_FOREIGN_COUNTRY_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(hint) for hint in _FOREIGN_COUNTRIES) + r")\b",
     re.I,
 )
-_US_TOKEN_RE = re.compile(
-    r"\b(united states(?: of america)?|usa|u\.s\.a\.?|u\.s\.|us-only|us only|north america|us)\b",
+_FOREIGN_CITY_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(hint) for hint in _FOREIGN_CITIES) + r")\b",
     re.I,
 )
+# Worldwide / regional scopes are not United States, even if "remote" is also set.
+_NON_US_SCOPE_RE = re.compile(
+    r"\b(?:worldwide|world-wide|anywhere|global|international|multi-?country|"
+    r"north america|emea|apac|latam|europe|european union|asia|africa|latin america)\b",
+    re.I,
+)
+_USA_RE = re.compile(
+    r"\b(?:united states(?: of america)?|u\.s\.a\.?|u\.s\.|usa|us-only|us only|us)\b",
+    re.I,
+)
+# Descriptions say "join us" constantly. Do not treat that bare word as a country.
+_USA_PHRASE_RE = re.compile(
+    r"\b(?:united states(?: of america)?|u\.s\.a\.?|u\.s\.|usa|us-only|us only)\b",
+    re.I,
+)
+_US_TOKEN_RE = _USA_RE
+_STATE_ABBREV_RE = re.compile(r"(?:,\s*|\b)([A-Z]{2})\b")
+# These postal codes are also country codes (India, Canada, Colombia, Germany, Indonesia).
+_AMBIGUOUS_ABBREVS = {"IN", "CA", "CO", "DE", "ID"}
+_PLAIN_REMOTE_WORDS = {
+    "remote", "hybrid", "distributed", "wfh", "work", "from", "home",
+    "flexible", "multiple", "locations", "location", "various", "not",
+    "specified", "unspecified", "na",
+}
+
+# Searches already locked to the United States. A bare "Remote" there is still a US job.
+US_SCOPED_PLATFORMS = frozenset({
+    "LinkedIn",
+    "Dice",
+    "Indeed",
+    "Glassdoor",
+    "ZipRecruiter",
+    "Google Jobs",
+})
 
 
 def parse_state(location: str) -> str:
@@ -225,6 +262,53 @@ def parse_state(location: str) -> str:
     return location.strip()[:48] or "Remote"
 
 
+def _without_new_mexico(text: str) -> str:
+    """'Mexico' is a country hint, but New Mexico is a US state."""
+    return re.sub(r"\bnew mexico\b", " ", text or "", flags=re.I)
+
+
+def _has_state_abbrev(text: str) -> bool:
+    return any(abbr in ABBREV_TO_STATE for abbr in _STATE_ABBREV_RE.findall(text or ""))
+
+
+def _has_us_city(text: str) -> bool:
+    lower = (text or "").lower()
+    for cities in STATE_CITIES.values():
+        if any(re.search(rf"\b{re.escape(city)}\b", lower) for city in cities):
+            return True
+    return False
+
+
+def _has_state_name(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(re.search(rf"\b{re.escape(state.lower())}\b", lower) for state in STATE_ABBREV)
+
+
+def _us_anchor(text: str) -> bool:
+    """USA token, postal abbreviation, or known US city. A bare state name is not enough."""
+    return bool(_USA_RE.search(text or "")) or _has_state_abbrev(text) or _has_us_city(text)
+
+
+def _foreign_cities_are_us_places(text: str) -> bool:
+    """Keep 'Paris, TX'. Drop 'Paris', 'London', and 'Bangalore, IN'."""
+    matched = False
+    for city in _FOREIGN_CITIES:
+        for match in re.finditer(rf"\b{re.escape(city)}\b", text or "", re.I):
+            matched = True
+            tail = (text or "")[match.end(): match.end() + 16]
+            abbr = re.match(r"\s*,\s*([A-Za-z]{2})\b", tail)
+            if not abbr:
+                return False
+            code = abbr.group(1).upper()
+            if code not in ABBREV_TO_STATE or code in _AMBIGUOUS_ABBREVS:
+                return False
+    return matched
+
+
+def _hard_us_signal(text: str) -> bool:
+    return _us_anchor(text) or _has_state_name(text)
+
+
 def _is_known_us_state(job_state: str) -> bool:
     state = (job_state or "").strip()
     if state in US_STATE_VALUES:
@@ -235,22 +319,61 @@ def _is_known_us_state(job_state: str) -> bool:
     return False
 
 
-def is_usa_job(job_state: str, job_location: str = "") -> bool:
-    """Keep US states, US-wide, and Remote — drop India/EU/other countries."""
+def _is_plain_remote(job_state: str, job_location: str) -> bool:
+    raw = f"{job_state or ''} {job_location or ''}".strip().lower()
+    if not raw:
+        return True
+    words = re.sub(r"[^a-z]+", " ", raw).split()
+    return bool(words) and all(word in _PLAIN_REMOTE_WORDS for word in words)
+
+
+def is_usa_job(job_state: str, job_location: str = "", *, allow_bare_remote: bool = True) -> bool:
+    """Keep United States listings. Drop other countries and worldwide scopes.
+
+    Bare "Remote" counts only when allow_bare_remote is set. US-scoped searches
+    (LinkedIn, Dice, Indeed, and the other JobSpy boards) use that because the
+    query itself was already limited to the United States. Global boards must
+    name a US state, city, or the United States.
+    """
     state = (job_state or "").strip()
-    hay = f"{state} {job_location or ''}"
-    foreign = bool(_FOREIGN_RE.search(hay))
-    us_token = bool(_US_TOKEN_RE.search(hay))
-    known = _is_known_us_state(state)
+    location = job_location or ""
+    text = f"{state} {location}".strip()
+    cleaned = _without_new_mexico(text)
 
-    if foreign:
-        if state == "Remote":
-            return us_token
-        if known and state not in {"Remote", "United States"}:
-            return True
-        return us_token
+    if _NON_US_SCOPE_RE.search(cleaned):
+        return False
+    if _FOREIGN_COUNTRY_RE.search(cleaned):
+        return False
+    if _FOREIGN_CITY_RE.search(cleaned):
+        return _foreign_cities_are_us_places(text)
+    if _hard_us_signal(text) or (_is_known_us_state(state) and state not in {"Remote", ""}):
+        return True
+    if allow_bare_remote and _is_plain_remote(state, location):
+        return True
+    return False
 
-    return known or us_token
+
+def normalize_scraped_location(
+    job_state: str,
+    job_location: str,
+    platform: str = "",
+    description: str = "",
+) -> tuple[str, str] | None:
+    """Return state/location for a US listing, or None when it should not be saved."""
+    state = (job_state or "").strip()
+    location = job_location or ""
+    us_scoped = (platform or "") in US_SCOPED_PLATFORMS
+    if (
+        not us_scoped
+        and _is_plain_remote(state, location)
+        and not _NON_US_SCOPE_RE.search(_without_new_mexico(f"{state} {location}"))
+        and _USA_PHRASE_RE.search(description or "")
+    ):
+        state = "United States"
+        location = "Remote, United States"
+    if not is_usa_job(state, location, allow_bare_remote=us_scoped):
+        return None
+    return state, location
 
 
 def matches_state_filter(job_state: str, job_location: str, selected: str) -> bool:

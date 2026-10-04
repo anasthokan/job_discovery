@@ -39,7 +39,7 @@ from jobscraper.items import JobItem
 from jobscraper.job_fields import infer_listing_fields
 from jobscraper.jobspy_source import scrape as scrape_jobspy
 from jobscraper.jobspy_source import sites_for_platform
-from jobscraper.locations import is_usa_job, muse_location, parse_state
+from jobscraper.locations import muse_location, normalize_scraped_location, parse_state
 
 HTML_RE = re.compile(r"<[^>]+>")
 WS_RE = re.compile(r"\s+")
@@ -477,8 +477,15 @@ class JobsSpider(scrapy.Spider):
             extra,
         ):
             return
-        if not is_usa_job(fields.get("state") or "", fields.get("location") or ""):
+        kept = normalize_scraped_location(
+            fields.get("state") or "",
+            fields.get("location") or "",
+            fields.get("platform") or "",
+            extra,
+        )
+        if not kept:
             return
+        fields["state"], fields["location"] = kept
         item = JobItem()
         for key, value in fields.items():
             item[key] = value

@@ -47,7 +47,13 @@ from jobscraper.job_fields import (
     apply_listing_filters,
     infer_listing_fields,
 )
-from jobscraper.locations import DROPDOWN_STATES, is_usa_job, matches_city_filter, matches_state_filter
+from jobscraper.locations import (
+    DROPDOWN_STATES,
+    US_SCOPED_PLATFORMS,
+    is_usa_job,
+    matches_city_filter,
+    matches_state_filter,
+)
 from jobscraper.recommend import (
     DEFAULT_LIMIT,
     MAX_LIMIT,
@@ -719,7 +725,11 @@ def filter_jobs(
 ) -> list[dict]:
     filtered = []
     for job in jobs:
-        if usa_only and not is_usa_job(job.get("state") or "", job.get("location") or ""):
+        if usa_only and not is_usa_job(
+            job.get("state") or "",
+            job.get("location") or "",
+            allow_bare_remote=(job.get("platform") or "") in US_SCOPED_PLATFORMS,
+        ):
             continue
         if platform != "All" and job.get("platform") != platform:
             continue
@@ -1287,7 +1297,11 @@ def _scrape_background(keywords: str, state: str, platform: str, city: str) -> N
         jobs = [
             job
             for job in load_jobs_json()
-            if is_usa_job(job.get("state") or "", job.get("location") or "")
+            if is_usa_job(
+                job.get("state") or "",
+                job.get("location") or "",
+                allow_bare_remote=(job.get("platform") or "") in US_SCOPED_PLATFORMS,
+            )
         ]
         _LAST_SCRAPE = {
             "ok": True,
