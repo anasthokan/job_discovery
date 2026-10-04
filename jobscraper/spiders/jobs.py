@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -44,6 +45,18 @@ SYNONYMS = {
     "backend": ("backend", "back end"),
     "fullstack": ("fullstack", "full stack"),
 }
+
+
+def _source_json(value) -> str:
+    """Serialize one source job object for jobs.raw_description."""
+    from jobscraper.db import _json_ready
+
+    if value is None:
+        return ""
+    try:
+        return json.dumps(_json_ready(value), ensure_ascii=False)[:500000]
+    except (TypeError, ValueError):
+        return "{}"
 
 
 def strip_html(value) -> str:
@@ -411,6 +424,7 @@ class JobsSpider(scrapy.Spider):
                     posted_at=row.get("posted_at") or "",
                     job_type=row.get("job_type"),
                     search_text=row.get("search_text") or "",
+                    raw=row.get("raw"),
                 ):
                     yield item
 
@@ -428,6 +442,7 @@ class JobsSpider(scrapy.Spider):
         )
 
     def _emit(self, **fields):
+        raw = fields.pop("raw", None)
         extra = fields.pop("search_text", "")
         if not self._matches(
             fields.get("title"),
@@ -445,6 +460,8 @@ class JobsSpider(scrapy.Spider):
         description = strip_html(extra)
         if description:
             item["description"] = description[:60000]
+        source = raw if raw is not None else {**fields, "description": description}
+        item["raw_description"] = _source_json(source)
         inferred = infer_listing_fields(
             title=fields.get("title") or "",
             location=fields.get("location") or "",
@@ -476,6 +493,7 @@ class JobsSpider(scrapy.Spider):
                 url=row.get("url") or row.get("apply_url") or "",
                 posted_at=str(posted),
                 search_text=row.get("description") or "",
+                raw=row,
             )
 
     def parse_remotive(self, response):
@@ -496,6 +514,7 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 job_type=row.get("job_type"),
                 search_text=row.get("description") or "",
+                raw=row,
             )
 
     def parse_jobicy(self, response):
@@ -517,6 +536,7 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 job_type=row.get("jobType"),
                 search_text=row.get("jobDescription") or row.get("jobExcerpt") or "",
+                raw=row,
             )
 
     def parse_muse(self, response):
@@ -541,6 +561,7 @@ class JobsSpider(scrapy.Spider):
                 url=url,
                 posted_at=str(posted),
                 search_text=row.get("contents") or "",
+                raw=row,
             )
 
     def parse_arbeitnow(self, response):
@@ -563,6 +584,7 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 job_type=" ".join(as_list(row.get("job_types"))),
                 search_text=row.get("description") or "",
+                raw=row,
             )
 
     def parse_himalayas(self, response):
@@ -583,6 +605,7 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 job_type=row.get("employmentType"),
                 search_text=f"{row.get('excerpt') or ''} {row.get('description') or ''}",
+                raw=row,
             )
 
     def parse_wwr(self, response):
@@ -652,6 +675,7 @@ class JobsSpider(scrapy.Spider):
                 url=row.get("absolute_url") or "",
                 posted_at=str(posted),
                 search_text=row.get("content") or "",
+                raw=row,
             )
 
     def parse_lever(self, response, company=""):
@@ -675,6 +699,7 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 job_type=cats.get("commitment"),
                 search_text=str((row.get("descriptionPlain") or row.get("description") or "")),
+                raw=row,
             )
 
     def parse_ashby(self, response, company=""):
@@ -708,6 +733,7 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 job_type=row.get("employmentType"),
                 search_text=row.get("descriptionPlain") or row.get("descriptionHtml") or "",
+                raw=row,
             )
 
     def parse_smartrecruiters(self, response, company=""):
@@ -732,6 +758,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=days_ago(posted),
                 url=url,
                 posted_at=str(posted),
+                raw=row,
             )
 
     def parse_workable(self, response, company=""):
@@ -766,6 +793,7 @@ class JobsSpider(scrapy.Spider):
                 url=url,
                 posted_at=str(posted),
                 search_text=row.get("description") or "",
+                raw=row,
             )
 
     def parse_linkedin(self, response):
@@ -784,6 +812,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=job["daysAgo"],
                 url=job["url"],
                 posted_at=job["posted_at"],
+                raw=job,
             )
 
     def parse_dice(self, response):
@@ -802,6 +831,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=job["daysAgo"],
                 url=job["url"],
                 posted_at=job["posted_at"],
+                raw=job,
             )
 
     def parse_yc(self, response):
@@ -820,6 +850,7 @@ class JobsSpider(scrapy.Spider):
                 daysAgo=job["daysAgo"],
                 url=job["url"],
                 posted_at=job["posted_at"],
+                raw=job,
             )
 
     def parse_hn_thread(self, response):
@@ -857,4 +888,5 @@ class JobsSpider(scrapy.Spider):
                 url=job["url"],
                 posted_at=job["posted_at"],
                 search_text=job.get("search_text") or "",
+                raw=hit,
             )

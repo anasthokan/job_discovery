@@ -13,6 +13,7 @@ class JobItem(scrapy.Item):
     url = scrapy.Field()
     posted_at = scrapy.Field()
     description = scrapy.Field()
+    raw_description = scrapy.Field()
     job_type = scrapy.Field()
     work_model = scrapy.Field()
     experience_level = scrapy.Field()

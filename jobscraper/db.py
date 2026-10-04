@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
+  raw_description LONGTEXT NULL,
   job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
   work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
   experience_level VARCHAR(32) NOT NULL DEFAULT 'unknown',
@@ -117,12 +118,12 @@ CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
 UPSERT_SQL = f"""
 INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
-  platform, days_ago, url, description, posted_at, is_active, e_verified, e_verify_name,
+  platform, days_ago, url, description, raw_description, posted_at, is_active, e_verified, e_verify_name,
   job_type, work_model, experience_level, years_experience, h1b_sponsorship, clearance_required,
   us_citizen_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
-  %s, %s, %s, %s, %s, 1, 'unknown', '',
+  %s, %s, %s, %s, %s, %s, 1, 'unknown', '',
   %s, %s, %s, %s, %s, %s,
   %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
@@ -139,6 +140,7 @@ ON DUPLICATE KEY UPDATE
   days_ago = new.days_ago,
   url = new.url,
   description = new.description,
+  raw_description = new.raw_description,
   posted_at = new.posted_at,
   job_type = new.job_type,
   work_model = new.work_model,
@@ -267,6 +269,9 @@ def _ensure_job_columns(cur) -> None:
         cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
+    cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'raw_description'")
+    if not cur.fetchone():
+        cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN raw_description LONGTEXT NULL")
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'us_citizen_required'")
     if not cur.fetchone():
         cur.execute(
@@ -447,6 +452,51 @@ def _listing_fields(job: dict, description: str) -> dict:
     }
 
 
+def _json_ready(value):
+    """Turn API payloads into values json.dumps can store."""
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, float) and value != value:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", "ignore")
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if hasattr(value, "item"):
+        try:
+            return _json_ready(value.item())
+        except Exception:
+            pass
+    return str(value)
+
+
+def _raw_description_json(job: dict) -> str:
+    """JSON text of the source job object, stored in jobs.raw_description."""
+    raw = job.get("raw_description")
+    if raw is None or raw == "":
+        raw = job.get("raw")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            return text[:500000]
+    if not isinstance(raw, (dict, list)):
+        raw = {
+            key: value
+            for key, value in job.items()
+            if key not in {"raw", "raw_description", "search_text"}
+        }
+    try:
+        return json.dumps(_json_ready(raw), ensure_ascii=False)[:500000]
+    except (TypeError, ValueError):
+        return "{}"
+
+
 def _years_value(value) -> int | None:
     if value is None or value == "":
         return None
@@ -488,6 +538,7 @@ def _row_from_item(job: dict) -> dict | None:
         "days_ago": max(days_ago, 0),
         "url": _clip(job.get("url"), 1000),
         "description": description,
+        "raw_description": _raw_description_json(job),
         "posted_at": _posted_mysql(job.get("posted_at")),
         **_listing_fields(job, description),
     }
@@ -564,6 +615,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["days_ago"],
                         row["url"],
                         row["description"],
+                        row["raw_description"],
                         row["posted_at"],
                         row["job_type"] if row["job_type"] in {"fulltime", "parttime", "contract", "internship"} else "fulltime",
                         row["work_model"],
