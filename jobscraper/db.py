@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   source_id VARCHAR(255) NULL,
   state VARCHAR(255) NOT NULL,
   url VARCHAR(1000) NOT NULL,
-  raw_description LONGTEXT NULL,
+  raw_description LONGTEXT NOT NULL,
   job_type VARCHAR(32) NOT NULL DEFAULT 'fulltime',
   work_model VARCHAR(16) NOT NULL DEFAULT 'unknown',
   experience_level VARCHAR(32) NOT NULL DEFAULT 'unknown',
@@ -144,7 +144,11 @@ ON DUPLICATE KEY UPDATE
     new.description,
     {JOBS_TABLE}.description
   ),
-  raw_description = COALESCE(new.raw_description, {JOBS_TABLE}.raw_description),
+  raw_description = IF(
+    CHAR_LENGTH(new.raw_description) > 0,
+    new.raw_description,
+    {JOBS_TABLE}.raw_description
+  ),
   posted_at = new.posted_at,
   job_type = new.job_type,
   work_model = new.work_model,
@@ -274,8 +278,19 @@ def _ensure_job_columns(cur) -> None:
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'raw_description'")
-    if not cur.fetchone():
-        cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN raw_description LONGTEXT NULL")
+    raw_column = cur.fetchone()
+    if not raw_column:
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} "
+            "ADD COLUMN raw_description LONGTEXT NOT NULL DEFAULT ('')"
+        )
+    elif str(raw_column.get("Null") or "").upper() == "YES":
+        cur.execute(
+            f"UPDATE {JOBS_TABLE} SET raw_description = '' WHERE raw_description IS NULL"
+        )
+        cur.execute(
+            f"ALTER TABLE {JOBS_TABLE} MODIFY COLUMN raw_description LONGTEXT NOT NULL"
+        )
     cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE 'us_citizen_required'")
     if not cur.fetchone():
         cur.execute(
@@ -402,8 +417,8 @@ def clear_copied_api_raw_descriptions() -> int:
         with _LOCK:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"UPDATE {JOBS_TABLE} SET raw_description = NULL "
-                    f"WHERE raw_description IS NOT NULL "
+                    f"UPDATE {JOBS_TABLE} SET raw_description = '' "
+                    f"WHERE raw_description <> '' "
                     f"AND CAST(raw_description AS CHAR) LIKE %s",
                     ('%"api_id"%',),
                 )
@@ -489,7 +504,7 @@ def _fill_short_dice_descriptions() -> None:
                     cur.execute(
                         f"UPDATE {JOBS_TABLE} SET description = %s, "
                         f"raw_description = IF("
-                        f"raw_description IS NULL OR CAST(raw_description AS CHAR) LIKE %s, "
+                        f"CHAR_LENGTH(raw_description) = 0 OR CAST(raw_description AS CHAR) LIKE %s, "
                         f"%s, raw_description) "
                         f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
                         (text, '%"api_id"%', payload, row["id"], text),
@@ -777,7 +792,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["days_ago"],
                         row["url"],
                         row["description"],
-                        row["raw_description"],
+                        row["raw_description"] or "",
                         row["posted_at"],
                         row["job_type"] if row["job_type"] in {"fulltime", "parttime", "contract", "internship"} else "fulltime",
                         row["work_model"],
