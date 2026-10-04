@@ -331,7 +331,6 @@ def init_db() -> bool:
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         backfill_listing_fields()
-        clear_copied_api_raw_descriptions()
         _EVERIFY_INDEX = None
         from jobscraper.everify import load_rows_from_csv
 
@@ -340,6 +339,7 @@ def init_db() -> bool:
             replace_everify_employers(rows)
             enrich_jobs_everify()
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
+        start_raw_description_cleanup()
         start_dice_description_backfill()
         return True
     except Exception:
@@ -430,6 +430,26 @@ def clear_copied_api_raw_descriptions() -> int:
         close_conn()
         log.exception("raw_description cleanup failed")
         return 0
+
+
+_RAW_CLEANUP_STARTED = False
+
+
+def start_raw_description_cleanup() -> None:
+    """Clear copied API payloads after the API is listening.
+
+    The update scans every raw_description. Running it during startup keeps
+    port 9001 closed until MySQL finishes.
+    """
+    global _RAW_CLEANUP_STARTED
+    if _RAW_CLEANUP_STARTED or not mysql_configured():
+        return
+    _RAW_CLEANUP_STARTED = True
+    threading.Thread(
+        target=clear_copied_api_raw_descriptions,
+        name="raw-description-cleanup",
+        daemon=True,
+    ).start()
 
 
 _DICE_BACKFILL_STARTED = False
