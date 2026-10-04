@@ -312,6 +312,7 @@ def init_db() -> bool:
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         backfill_listing_fields()
+        backfill_raw_descriptions()
         _EVERIFY_INDEX = None
         from jobscraper.everify import load_rows_from_csv
 
@@ -378,6 +379,46 @@ def backfill_listing_fields() -> int:
     except Exception:
         close_conn()
         log.exception("Listing field backfill failed")
+        return 0
+
+
+def backfill_raw_descriptions() -> int:
+    """Fill jobs.raw_description for rows saved before the source JSON was stored."""
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        with _LOCK:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id AS api_id, "
+                    f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
+                    f"title, company, skills, state, location, platform, "
+                    f"days_ago, url, description, job_type, work_model, experience_level, "
+                    f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
+                    f"posted_at, e_verified, e_verify_name "
+                    f"FROM {JOBS_TABLE} "
+                    f"WHERE raw_description IS NULL OR TRIM(CAST(raw_description AS CHAR)) = ''"
+                )
+                rows = cur.fetchall() or []
+                if not rows:
+                    return 0
+                payload = [
+                    (json.dumps(_json_ready(_job_payload(row, include_raw=False)), ensure_ascii=False), row["api_id"])
+                    for row in rows
+                ]
+                for start in range(0, len(payload), 200):
+                    cur.executemany(
+                        f"UPDATE {JOBS_TABLE} SET raw_description = %s WHERE id = %s",
+                        payload[start : start + 200],
+                    )
+        log.info("Backfilled raw_description on %s jobs", len(payload))
+        return len(payload)
+    except Exception:
+        close_conn()
+        log.exception("raw_description backfill failed")
         return 0
 
 
@@ -677,8 +718,28 @@ def _as_e_verified(value) -> str:
     return "unknown"
 
 
-def _job_from_row(row: dict) -> dict:
+def _parse_raw_description(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode("utf-8", "ignore")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    return value
+
+
+def _job_payload(row: dict, *, include_raw: bool) -> dict:
     posted = row.get("posted_at")
+    if isinstance(posted, datetime):
+        posted = posted.strftime("%Y-%m-%d %H:%M:%S")
     days = _days_ago_from_iso(posted, int(row.get("days_ago") or 0))
     payload = {
         "id": row.get("id"),
@@ -704,7 +765,13 @@ def _job_from_row(row: dict) -> dict:
     }
     if row.get("api_id") is not None:
         payload["api_id"] = int(row["api_id"])
+    if include_raw:
+        payload["raw_description"] = _parse_raw_description(row.get("raw_description"))
     return payload
+
+
+def _job_from_row(row: dict) -> dict:
+    return _job_payload(row, include_raw=True)
 
 
 def load_jobs() -> list[dict]:
@@ -727,7 +794,7 @@ def load_jobs() -> list[dict]:
                 f"SELECT id AS api_id, "
                 f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, description, job_type, work_model, experience_level, "
+                f"days_ago, url, description, raw_description, job_type, work_model, experience_level, "
                 f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
                 f"posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
