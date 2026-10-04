@@ -139,7 +139,11 @@ ON DUPLICATE KEY UPDATE
   platform = new.platform,
   days_ago = new.days_ago,
   url = new.url,
-  description = new.description,
+  description = IF(
+    CHAR_LENGTH(new.description) > CHAR_LENGTH({JOBS_TABLE}.description),
+    new.description,
+    {JOBS_TABLE}.description
+  ),
   raw_description = COALESCE(new.raw_description, {JOBS_TABLE}.raw_description),
   posted_at = new.posted_at,
   job_type = new.job_type,
