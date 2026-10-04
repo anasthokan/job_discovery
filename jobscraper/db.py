@@ -314,7 +314,6 @@ def _ensure_job_columns(cur) -> None:
 
 
 def init_db() -> bool:
-    global _EVERIFY_INDEX
     cfg = mysql_config()
     if not cfg:
         log.info("MySQL not configured; jobs stay in data/jobs.json")
@@ -330,17 +329,8 @@ def init_db() -> bool:
             cur.execute(CREATE_EVERIFY_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
-        backfill_listing_fields()
-        _EVERIFY_INDEX = None
-        from jobscraper.everify import load_rows_from_csv
-
-        rows = load_rows_from_csv()
-        if rows:
-            replace_everify_employers(rows)
-            enrich_jobs_everify()
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
-        start_raw_description_cleanup()
-        start_dice_description_backfill()
+        start_startup_maintenance()
         return True
     except Exception:
         close_conn()
@@ -432,22 +422,35 @@ def clear_copied_api_raw_descriptions() -> int:
         return 0
 
 
-_RAW_CLEANUP_STARTED = False
+_STARTUP_MAINTENANCE_STARTED = False
 
 
-def start_raw_description_cleanup() -> None:
-    """Clear copied API payloads after the API is listening.
+def _startup_maintenance() -> None:
+    """Backfill and cleanup after uvicorn is already listening on port 9001."""
+    global _EVERIFY_INDEX
+    try:
+        backfill_listing_fields()
+        _EVERIFY_INDEX = None
+        from jobscraper.everify import load_rows_from_csv
 
-    The update scans every raw_description. Running it during startup keeps
-    port 9001 closed until MySQL finishes.
-    """
-    global _RAW_CLEANUP_STARTED
-    if _RAW_CLEANUP_STARTED or not mysql_configured():
+        rows = load_rows_from_csv()
+        if rows:
+            replace_everify_employers(rows)
+            enrich_jobs_everify()
+        clear_copied_api_raw_descriptions()
+    except Exception:
+        log.exception("Startup maintenance failed")
+    start_dice_description_backfill()
+
+
+def start_startup_maintenance() -> None:
+    global _STARTUP_MAINTENANCE_STARTED
+    if _STARTUP_MAINTENANCE_STARTED or not mysql_configured():
         return
-    _RAW_CLEANUP_STARTED = True
+    _STARTUP_MAINTENANCE_STARTED = True
     threading.Thread(
-        target=clear_copied_api_raw_descriptions,
-        name="raw-description-cleanup",
+        target=_startup_maintenance,
+        name="startup-maintenance",
         daemon=True,
     ).start()
 
