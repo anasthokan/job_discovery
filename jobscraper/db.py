@@ -190,6 +190,8 @@ def mysql_config() -> dict | None:
         "charset": "utf8mb4",
         "autocommit": True,
         "connect_timeout": int(_env("MYSQL_CONNECT_TIMEOUT", "5") or "5"),
+        "read_timeout": int(_env("MYSQL_READ_TIMEOUT", "20") or "20"),
+        "write_timeout": int(_env("MYSQL_WRITE_TIMEOUT", "60") or "60"),
     }
 
 
@@ -208,6 +210,8 @@ def _connect(cfg: dict, *, with_database: bool = True):
         "charset": cfg["charset"],
         "autocommit": cfg["autocommit"],
         "connect_timeout": cfg["connect_timeout"],
+        "read_timeout": cfg["read_timeout"],
+        "write_timeout": cfg["write_timeout"],
         "cursorclass": pymysql.cursors.DictCursor,
     }
     if with_database:
@@ -348,42 +352,41 @@ def backfill_listing_fields() -> int:
     if conn is None:
         return 0
     try:
-        with _LOCK:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"SELECT id, title, location, state, description, job_type "
-                    f"FROM {JOBS_TABLE} WHERE listing_inferred = 0"
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, title, location, state, description, job_type "
+                f"FROM {JOBS_TABLE} WHERE listing_inferred = 0"
+            )
+            rows = cur.fetchall() or []
+            if not rows:
+                return 0
+            payload = []
+            for row in rows:
+                fields = infer_listing_fields(
+                    title=row.get("title") or "",
+                    location=row.get("location") or "",
+                    state=row.get("state") or "",
+                    description=row.get("description") or "",
+                    job_type=row.get("job_type") or "",
                 )
-                rows = cur.fetchall() or []
-                if not rows:
-                    return 0
-                payload = []
-                for row in rows:
-                    fields = infer_listing_fields(
-                        title=row.get("title") or "",
-                        location=row.get("location") or "",
-                        state=row.get("state") or "",
-                        description=row.get("description") or "",
-                        job_type=row.get("job_type") or "",
+                payload.append(
+                    (
+                        fields["work_model"],
+                        str(fields["experience_level"] or "unknown")[:32],
+                        fields["years_experience"],
+                        fields["h1b_sponsorship"],
+                        fields["clearance_required"],
+                        fields["us_citizen_required"],
+                        fields["job_type"],
+                        row["id"],
                     )
-                    payload.append(
-                        (
-                            fields["work_model"],
-                            str(fields["experience_level"] or "unknown")[:32],
-                            fields["years_experience"],
-                            fields["h1b_sponsorship"],
-                            fields["clearance_required"],
-                            fields["us_citizen_required"],
-                            fields["job_type"],
-                            row["id"],
-                        )
-                    )
-                cur.executemany(
-                    f"UPDATE {JOBS_TABLE} SET work_model=%s, experience_level=%s, "
-                    f"years_experience=%s, h1b_sponsorship=%s, clearance_required=%s, "
-                    f"us_citizen_required=%s, job_type=%s, listing_inferred=1 WHERE id=%s",
-                    payload,
                 )
+            cur.executemany(
+                f"UPDATE {JOBS_TABLE} SET work_model=%s, experience_level=%s, "
+                f"years_experience=%s, h1b_sponsorship=%s, clearance_required=%s, "
+                f"us_citizen_required=%s, job_type=%s, listing_inferred=1 WHERE id=%s",
+                payload,
+            )
         log.info("Backfilled listing fields on %s jobs", len(payload))
         return len(payload)
     except Exception:
@@ -404,15 +407,14 @@ def clear_copied_api_raw_descriptions() -> int:
     if conn is None:
         return 0
     try:
-        with _LOCK:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE {JOBS_TABLE} SET raw_description = '' "
-                    f"WHERE raw_description <> '' "
-                    f"AND CAST(raw_description AS CHAR) LIKE %s",
-                    ('%"api_id"%',),
-                )
-                cleared = int(cur.rowcount or 0)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE {JOBS_TABLE} SET raw_description = '' "
+                f"WHERE raw_description <> '' "
+                f"AND CAST(raw_description AS CHAR) LIKE %s",
+                ('%"api_id"%',),
+            )
+            cleared = int(cur.rowcount or 0)
         if cleared:
             log.info("Cleared copied API fields from raw_description on %s jobs", cleared)
         return cleared
@@ -433,10 +435,11 @@ def _startup_maintenance() -> None:
         _EVERIFY_INDEX = None
         from jobscraper.everify import load_rows_from_csv
 
-        rows = load_rows_from_csv()
-        if rows:
-            replace_everify_employers(rows)
-            enrich_jobs_everify()
+        if everify_count() <= 0:
+            rows = load_rows_from_csv()
+            if rows:
+                replace_everify_employers(rows)
+        enrich_jobs_everify(only_unknown=True)
         clear_copied_api_raw_descriptions()
     except Exception:
         log.exception("Startup maintenance failed")
@@ -522,16 +525,15 @@ def _fill_short_dice_descriptions() -> None:
             continue
         payload = json.dumps({"url": url, "jobDescription": text}, ensure_ascii=False)
         try:
-            with _LOCK:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"UPDATE {JOBS_TABLE} SET description = %s, "
-                        f"raw_description = IF("
-                        f"CHAR_LENGTH(raw_description) = 0 OR CAST(raw_description AS CHAR) LIKE %s, "
-                        f"%s, raw_description) "
-                        f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
-                        (text, '%"api_id"%', payload, row["id"], text),
-                    )
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {JOBS_TABLE} SET description = %s, "
+                    f"raw_description = IF("
+                    f"CHAR_LENGTH(raw_description) = 0 OR CAST(raw_description AS CHAR) LIKE %s, "
+                    f"%s, raw_description) "
+                    f"WHERE id = %s AND CHAR_LENGTH(description) < CHAR_LENGTH(%s)",
+                    (text, '%"api_id"%', payload, row["id"], text),
+                )
             filled += 1
         except Exception:
             close_conn()
@@ -940,14 +942,6 @@ def load_jobs() -> list[dict]:
         conn = get_conn()
         if conn is None:
             return []
-        try:
-            enrich_jobs_everify(only_unknown=True)
-        except Exception:
-            log.exception("Could not resolve unknown e_verified rows")
-            close_conn()
-            conn = get_conn()
-            if conn is None:
-                return []
         with conn.cursor() as cur:
             cur.execute(
                 f"SELECT id AS api_id, "
@@ -1512,16 +1506,15 @@ def replace_everify_employers(rows: list[dict]) -> int:
                     (row.get("hiring_sites") or None),
                 )
             )
-    with _LOCK:
-        with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM {EVERIFY_TABLE}")
-            if payload:
-                cur.executemany(
-                    f"INSERT INTO {EVERIFY_TABLE} "
-                    "(name_key, employer, dba, account_status, everify_plus, date_enrolled, hiring_sites) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    payload,
-                )
+    with conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {EVERIFY_TABLE}")
+        if payload:
+            cur.executemany(
+                f"INSERT INTO {EVERIFY_TABLE} "
+                "(name_key, employer, dba, account_status, everify_plus, date_enrolled, hiring_sites) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                payload,
+            )
     _EVERIFY_INDEX = build_index(rows)
     return len(payload)
 

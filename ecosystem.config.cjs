@@ -23,10 +23,11 @@ module.exports = {
       instances: 1,
       autorestart: true,
       watch: false,
-      max_restarts: 20,
+      max_restarts: 100,
       min_uptime: 5000,
       restart_delay: 2000,
-      max_memory_restart: "800M",
+      exp_backoff_restart_delay: 2000,
+      max_memory_restart: "1500M",
       env: {
         PYTHONUNBUFFERED: "1",
       },

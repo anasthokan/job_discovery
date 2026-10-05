@@ -8,6 +8,7 @@ data/everify_employers.csv (or set EVERIFY_CSV).
 
 from __future__ import annotations
 
+import bisect
 import csv
 import logging
 import os
@@ -123,20 +124,33 @@ def build_index(rows: list[dict]) -> dict[str, dict]:
     return index
 
 
+def _sorted_index_keys(index: dict[str, dict]) -> list[str]:
+    cached = getattr(_sorted_index_keys, "cache", None)
+    if cached is not None and cached[0] is index:
+        return cached[1]
+    keys = sorted(index)
+    _sorted_index_keys.cache = (index, keys)
+    return keys
+
+
 def match_company(company: str, index: dict[str, dict]) -> dict | None:
+    """Exact name, then a prefix either way. Avoid scanning every enrolled employer."""
     key = normalize_name(company)
-    if len(key) < 4:
+    if len(key) < 4 or not index:
         return None
     hit = index.get(key)
     if hit:
         return hit
     if len(key) < 8:
         return None
-    for employer_key, row in index.items():
-        if key in employer_key or employer_key in key:
-            shorter, longer = sorted((key, employer_key), key=len)
-            if len(shorter) >= 8 and longer.startswith(shorter):
-                return row
+    for size in range(len(key) - 1, 7, -1):
+        hit = index.get(key[:size])
+        if hit:
+            return hit
+    keys = _sorted_index_keys(index)
+    pos = bisect.bisect_left(keys, key)
+    if pos < len(keys) and keys[pos].startswith(key):
+        return index[keys[pos]]
     return None
 
 

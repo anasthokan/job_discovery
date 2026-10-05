@@ -108,6 +108,7 @@ USAJOBS_AGENCIES_URL = USAJOBS_CODELISTS["agencies"]["url"]
 _USAJOBS_LOCK = threading.Lock()
 _USAJOBS_CACHE: dict[str, dict] = {}
 _SCHEDULER: BackgroundScheduler | None = None
+_BOOT_STOP = threading.Event()
 
 
 def _env(name: str, default: str = "") -> str:
@@ -181,13 +182,35 @@ def _start_scheduler() -> BackgroundScheduler | None:
     return scheduler
 
 
+def _boot() -> None:
+    """MySQL setup stays off the accept path. IIS returns 502 until this port is open."""
+    global _SCHEDULER
+    try:
+        init_mysql()
+        import_json_if_empty(DATA_FILE)
+    except Exception:
+        log.exception("API boot failed")
+    if _BOOT_STOP.is_set():
+        return
+    try:
+        scheduler = _start_scheduler()
+    except Exception:
+        log.exception("Scrape scheduler failed")
+        return
+    if _BOOT_STOP.is_set():
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+        return
+    _SCHEDULER = scheduler
+
+
 @asynccontextmanager
 async def lifespan(_app):
     global _SCHEDULER
-    init_mysql()
-    import_json_if_empty(DATA_FILE)
-    _SCHEDULER = _start_scheduler()
+    _BOOT_STOP.clear()
+    threading.Thread(target=_boot, name="api-boot", daemon=True).start()
     yield
+    _BOOT_STOP.set()
     if _SCHEDULER is not None:
         _SCHEDULER.shutdown(wait=False)
         _SCHEDULER = None
