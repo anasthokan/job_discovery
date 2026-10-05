@@ -301,16 +301,7 @@ def _ensure_job_columns(cur) -> None:
             f"ALTER TABLE {JOBS_TABLE} "
             "ADD COLUMN us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no'"
         )
-        # Re-run inference on saved rows so the new column is filled.
         cur.execute(f"UPDATE {JOBS_TABLE} SET listing_inferred = 0")
-    else:
-        cur.execute(
-            f"ALTER TABLE {JOBS_TABLE} ALTER COLUMN us_citizen_required SET DEFAULT 'no'"
-        )
-        cur.execute(
-            f"UPDATE {JOBS_TABLE} SET us_citizen_required = 'no' "
-            "WHERE us_citizen_required NOT IN ('yes', 'no')"
-        )
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -334,7 +325,6 @@ def init_db() -> bool:
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
-        start_startup_maintenance()
         return True
     except Exception:
         close_conn()
@@ -1642,13 +1632,17 @@ def enrich_jobs_everify(*, only_unknown: bool = False) -> dict:
 
 
 def health() -> dict:
+    """Liveness only. A locked jobs table must not hang this check into an IIS 502."""
     cfg = mysql_config()
     if not cfg:
         return {"configured": False, "ok": False, "jobs": 0}
+    conn = None
     try:
-        conn = get_conn()
-        if conn is None:
-            return {"configured": True, "ok": False, "jobs": 0, "error": "no connection"}
+        quick = dict(cfg)
+        quick["connect_timeout"] = 3
+        quick["read_timeout"] = 3
+        quick["write_timeout"] = 3
+        conn = _connect(quick)
         with conn.cursor() as cur:
             cur.execute("SELECT 1 AS ok")
         return {
@@ -1657,13 +1651,15 @@ def health() -> dict:
             "host": cfg["host"],
             "database": cfg["database"],
             "jobs_table": JOBS_TABLE,
-            "jobs": job_count(),
-            "everify_employers": everify_count(),
-            **{k: v for k, v in last_scrape_meta().items() if k in {"scraped_at", "status"}},
         }
     except Exception as exc:
-        close_conn()
         return {"configured": True, "ok": False, "jobs": 0, "error": str(exc)[:300]}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def import_json_if_empty(path: Path) -> int:
