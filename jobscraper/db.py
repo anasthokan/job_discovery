@@ -231,14 +231,29 @@ def _ensure_database(cfg: dict) -> None:
         conn.close()
 
 
+def _tune_session(conn) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION wait_timeout=300")
+            cur.execute("SET SESSION interactive_timeout=300")
+            cur.execute("SET SESSION max_execution_time=20000")
+    except Exception:
+        pass
+
+
 def get_conn():
     cfg = mysql_config()
     if not cfg:
         return None
     conn = getattr(_local, "conn", None)
     if conn is not None and getattr(conn, "open", False):
-        return conn
+        try:
+            conn.ping(reconnect=False)
+            return conn
+        except Exception:
+            close_conn()
     conn = _connect(cfg)
+    _tune_session(conn)
     _local.conn = conn
     return conn
 
