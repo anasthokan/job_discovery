@@ -9,13 +9,18 @@ Set-Location $root
 
 $pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
 if ($pm2) {
-  pm2 delete job-discovery
-  pm2 start (Join-Path $root "ecosystem.config.cjs")
+  pm2 restart job-discovery --update-env
+  if ($LASTEXITCODE -ne 0) {
+    pm2 start (Join-Path $root "ecosystem.config.cjs")
+  }
   pm2 save
 } else {
-  Get-NetTCPConnection -LocalPort 9001 -State Listen -ErrorAction SilentlyContinue |
-    ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
-  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "start-job-discovery.bat" -WorkingDirectory $root -WindowStyle Minimized
+  $listening = Get-NetTCPConnection -LocalPort 9001 -State Listen -ErrorAction SilentlyContinue
+  if ($listening) {
+    Write-Host "API is already listening on port 9001. Left it running."
+  } else {
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "start-job-discovery.bat" -WorkingDirectory $root -WindowStyle Minimized
+  }
 }
 
 try {

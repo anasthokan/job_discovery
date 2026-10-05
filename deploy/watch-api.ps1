@@ -18,14 +18,4 @@ try {
   Write-Watch "health failed: $($_.Exception.Message)"
 }
 
-$pm2 = Get-Command pm2 -ErrorAction SilentlyContinue
-if ($pm2) {
-  pm2 restart job-discovery --update-env
-  Write-Watch "pm2 restart exit $LASTEXITCODE"
-  exit 0
-}
-
-Get-NetTCPConnection -LocalPort 9001 -State Listen -ErrorAction SilentlyContinue |
-  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
-Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "start-job-discovery.bat" -WorkingDirectory $root -WindowStyle Minimized
-Write-Watch "started uvicorn"
+Write-Watch "left the process running"
