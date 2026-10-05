@@ -926,6 +926,7 @@ def _job_from_row(row: dict) -> dict:
 
 
 def load_jobs() -> list[dict]:
+    load_jobs.last_error = None
     if not mysql_configured():
         return []
     try:
@@ -937,14 +938,17 @@ def load_jobs() -> list[dict]:
                 f"SELECT id AS api_id, "
                 f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
                 f"title, company, skills, state, location, platform, "
-                f"days_ago, url, description, raw_description, job_type, work_model, experience_level, "
+                f"days_ago, url, LEFT(description, 800) AS description, "
+                f"job_type, work_model, experience_level, "
                 f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
                 f"posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []
+        load_jobs.last_error = None
         return [_job_from_row(row) for row in rows]
-    except Exception:
+    except Exception as exc:
+        load_jobs.last_error = str(exc)[:300]
         log.exception("MySQL load_jobs failed")
         close_conn()
         return []

@@ -1250,7 +1250,7 @@ def get_jobs(
     limit, offset = _resolve_jobs_window(limit, offset, page)
     page_rows = _page(jobs, limit, offset)
     total = len(jobs)
-    return {
+    payload = {
         "jobs": _with_time_ago(page_rows),
         "count": len(page_rows),
         "total": total,
@@ -1260,6 +1260,13 @@ def get_jobs(
         "source": "mysql" if mysql_configured() else "json",
         **cache_meta(),
     }
+    db_error = getattr(load_jobs_mysql, "last_error", None)
+    if db_error:
+        payload["mysql_error"] = db_error
+        payload["stored"] = mysql_job_count()
+    elif total == 0 and mysql_configured():
+        payload["stored"] = mysql_job_count()
+    return payload
 
 
 @app.get("/api/usajobs/agencies")
