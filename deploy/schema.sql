@@ -68,3 +68,14 @@ CREATE TABLE IF NOT EXISTS job_discovery_everify_employers (
   PRIMARY KEY (name_key),
   KEY idx_jd_everify_status (account_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS job_discovery_h1b_sponsors (
+  name_key VARCHAR(255) NOT NULL,
+  employer VARCHAR(512) NOT NULL,
+  approvals INT UNSIGNED NOT NULL,
+  denials INT UNSIGNED NOT NULL,
+  first_fiscal_year SMALLINT NOT NULL,
+  last_fiscal_year SMALLINT NOT NULL,
+  PRIMARY KEY (name_key),
+  KEY idx_jd_h1b_last_year (last_fiscal_year)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -54,15 +54,10 @@ SYNONYMS = {
 
 
 def _source_json(value) -> str:
-    """Serialize one source job object for jobs.raw_description."""
-    from jobscraper.db import _json_ready
+    """Source fields that are not our job columns, saved in jobs.raw_description."""
+    from jobscraper.db import source_extras_json
 
-    if value is None:
-        return ""
-    try:
-        return json.dumps(_json_ready(value), ensure_ascii=False)[:500000]
-    except (TypeError, ValueError):
-        return "{}"
+    return source_extras_json(value)
 
 
 def _feed_item_raw(item) -> dict:
@@ -492,8 +487,7 @@ class JobsSpider(scrapy.Spider):
         description = strip_html(extra)
         if description:
             item["description"] = description[:60000]
-        if raw is not None:
-            item["raw_description"] = _source_json(raw)
+        item["raw_description"] = _source_json(raw)
         inferred = infer_listing_fields(
             title=fields.get("title") or "",
             location=fields.get("location") or "",

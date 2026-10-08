@@ -29,11 +29,15 @@ _LOCK = threading.Lock()
 _local = threading.local()
 _DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 _EVERIFY_INDEX: dict | None = None
+_H1B_INDEX: dict | None = None
+_H1B_LOAD_LOCK = threading.Lock()
+_H1B_LOAD_STARTED = False
 
 # Scraped listings go into the shared ezyjob database, table `jobs`.
 JOBS_TABLE = "jobs"
 RUNS_TABLE = "job_discovery_scrape_runs"
 EVERIFY_TABLE = "job_discovery_everify_employers"
+H1B_TABLE = "job_discovery_h1b_sponsors"
 CANDIDATES_TABLE = "job_discovery_candidates"
 
 CREATE_JOBS_SQL = f"""
@@ -85,6 +89,19 @@ CREATE TABLE IF NOT EXISTS {EVERIFY_TABLE} (
   hiring_sites VARCHAR(512) NULL,
   PRIMARY KEY (name_key),
   KEY idx_jd_everify_status (account_status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
+CREATE_H1B_SQL = f"""
+CREATE TABLE IF NOT EXISTS {H1B_TABLE} (
+  name_key VARCHAR(255) NOT NULL,
+  employer VARCHAR(512) NOT NULL,
+  approvals INT UNSIGNED NOT NULL,
+  denials INT UNSIGNED NOT NULL,
+  first_fiscal_year SMALLINT NOT NULL,
+  last_fiscal_year SMALLINT NOT NULL,
+  PRIMARY KEY (name_key),
+  KEY idx_jd_h1b_last_year (last_fiscal_year)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
@@ -145,16 +162,28 @@ ON DUPLICATE KEY UPDATE
     {JOBS_TABLE}.description
   ),
   raw_description = IF(
-    CHAR_LENGTH(new.raw_description) > 0,
+    CHAR_LENGTH(new.raw_description) > 2,
     new.raw_description,
-    {JOBS_TABLE}.raw_description
+    IF(
+      CHAR_LENGTH({JOBS_TABLE}.raw_description) > 2,
+      {JOBS_TABLE}.raw_description,
+      IF(CHAR_LENGTH(new.raw_description) > 0, new.raw_description, '{{}}')
+    )
   ),
   posted_at = new.posted_at,
   job_type = new.job_type,
   work_model = new.work_model,
   experience_level = new.experience_level,
   years_experience = new.years_experience,
-  h1b_sponsorship = new.h1b_sponsorship,
+  h1b_sponsorship = IF(
+    new.h1b_sponsorship = 'no',
+    'no',
+    IF(
+      new.h1b_sponsorship = 'yes' OR {JOBS_TABLE}.h1b_sponsorship = 'yes',
+      'yes',
+      new.h1b_sponsorship
+    )
+  ),
   clearance_required = new.clearance_required,
   us_citizen_required = new.us_citizen_required,
   listing_inferred = 1,
@@ -337,6 +366,7 @@ def init_db() -> bool:
             cur.execute(CREATE_JOBS_SQL)
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_EVERIFY_SQL)
+            cur.execute(CREATE_H1B_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
@@ -359,7 +389,7 @@ def backfill_listing_fields() -> int:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT id, title, location, state, description, job_type "
+                f"SELECT id, title, company, location, state, description, job_type "
                 f"FROM {JOBS_TABLE} WHERE listing_inferred = 0"
             )
             rows = cur.fetchall() or []
@@ -379,7 +409,7 @@ def backfill_listing_fields() -> int:
                         fields["work_model"],
                         str(fields["experience_level"] or "unknown")[:32],
                         fields["years_experience"],
-                        fields["h1b_sponsorship"],
+                        _resolved_h1b(row.get("company"), fields["h1b_sponsorship"]),
                         fields["clearance_required"],
                         fields["us_citizen_required"],
                         fields["job_type"],
@@ -528,7 +558,7 @@ def _fill_short_dice_descriptions() -> None:
         failures = 0
         if not text:
             continue
-        payload = json.dumps({"url": url, "jobDescription": text}, ensure_ascii=False)
+        payload = json.dumps({"jobDescription": text}, ensure_ascii=False)
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -614,7 +644,9 @@ def _listing_fields(job: dict, description: str) -> dict:
         "work_model": str(fields["work_model"] or "unknown")[:16],
         "experience_level": level[:32],
         "years_experience": fields["years_experience"],
-        "h1b_sponsorship": str(fields["h1b_sponsorship"] or "unknown")[:16],
+        "h1b_sponsorship": _resolved_h1b(
+            job.get("company"), fields["h1b_sponsorship"]
+        )[:16],
         "clearance_required": str(fields["clearance_required"] or "unknown")[:16],
         "us_citizen_required": str(fields["us_citizen_required"] or "no")[:16],
     }
@@ -666,7 +698,10 @@ _API_JOB_KEYS = {
     "e_verified",
     "e_verify_name",
     "api_id",
+    "job_id",
     "search_text",
+    "raw",
+    "raw_description",
 }
 
 
@@ -678,37 +713,63 @@ def _is_copied_api_job(value: dict) -> bool:
     return copied.issubset(value) and set(value).issubset(_API_JOB_KEYS)
 
 
-def _raw_description_json(job: dict) -> str | None:
-    """JSON text of the scraped source job. Our own API fields are not stored."""
-    raw = job.get("raw")
-    if raw is None or raw == "":
-        raw = job.get("raw_description")
-    if isinstance(raw, str):
-        text = raw.strip()
+def _is_empty_source_value(value) -> bool:
+    if value is None or value == [] or value == {}:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, float) and value != value:
+        return True
+    return False
+
+
+def source_extras(value) -> dict:
+    """Scraped fields that are not already stored in our job columns."""
+    if isinstance(value, str):
+        text = value.strip()
         if not text or text in {"{}", "[]", "null"}:
-            return None
+            return {}
         if text[:1] in "{[":
             try:
                 parsed = json.loads(text)
             except json.JSONDecodeError:
-                return text[:500000]
-            return _raw_description_json({"raw": parsed})
-        return text[:500000]
-    if isinstance(raw, dict):
-        if not raw or _is_copied_api_job(raw):
-            return None
-        try:
-            return json.dumps(_json_ready(raw), ensure_ascii=False)[:500000]
-        except (TypeError, ValueError):
-            return None
-    if isinstance(raw, list):
-        if not raw:
-            return None
-        try:
-            return json.dumps(_json_ready(raw), ensure_ascii=False)[:500000]
-        except (TypeError, ValueError):
-            return None
-    return None
+                return {"text": text[:500000]}
+            return source_extras(parsed)
+        return {"text": text[:500000]}
+    if isinstance(value, list):
+        items = [item for item in (_json_ready(item) for item in value) if not _is_empty_source_value(item)]
+        return {"items": items} if items else {}
+    if not isinstance(value, dict):
+        if _is_empty_source_value(value):
+            return {}
+        ready = _json_ready(value)
+        return {} if _is_empty_source_value(ready) else {"value": ready}
+    if _is_copied_api_job(value):
+        return {}
+    extra = {}
+    for key, item in _json_ready(value).items():
+        if str(key) in _API_JOB_KEYS:
+            continue
+        if _is_empty_source_value(item):
+            continue
+        extra[str(key)] = item
+    return extra
+
+
+def source_extras_json(value) -> str:
+    """JSON object of scraped fields outside our columns. Empty object when there are none."""
+    try:
+        return json.dumps(source_extras(value), ensure_ascii=False)[:500000]
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _raw_description_json(job: dict) -> str:
+    """JSON text saved in jobs.raw_description. Our own columns are left out."""
+    raw = job.get("raw")
+    if raw is None or raw == "":
+        raw = job.get("raw_description")
+    return source_extras_json(raw)
 
 
 def _years_value(value) -> int | None:
@@ -764,16 +825,18 @@ def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
         row = cur.fetchone()
         if row:
             found[key] = int(row["id"])
+            _mark_company_h1b(cur, int(row["id"]), name)
             continue
+        sponsor = _company_h1b_note(name)
         cur.execute(
             """
             INSERT INTO companies (
               public_id, name, normalized_name, website, h1b_sponsor,
               sponsorship_notes, logo_url, created_at, updated_at
-            ) VALUES (%s, %s, %s, '', 0, '', '', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+            ) VALUES (%s, %s, %s, '', %s, %s, '', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
             ON DUPLICATE KEY UPDATE updated_at = companies.updated_at
             """,
-            (_public_id("company:" + key), name, key),
+            (_public_id("company:" + key), name, key, 1 if sponsor else 0, sponsor or ""),
         )
         cur.execute(
             "SELECT id FROM companies WHERE public_id = %s OR normalized_name = %s LIMIT 1",
@@ -782,6 +845,7 @@ def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
         row = cur.fetchone()
         if row:
             found[key] = int(row["id"])
+            _mark_company_h1b(cur, int(row["id"]), name)
     return found
 
 
@@ -885,21 +949,10 @@ def _as_e_verified(value) -> str:
 
 
 def _parse_raw_description(value):
-    if value is None or value == "":
-        return None
-    if isinstance(value, (dict, list)):
-        return value
+    """Always an object. Our columns are removed; missing source data is {}."""
     if isinstance(value, (bytes, bytearray)):
         value = value.decode("utf-8", "ignore")
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
-    return value
+    return source_extras(value)
 
 
 def _job_payload(row: dict, *, include_raw: bool) -> dict:
@@ -930,7 +983,9 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "e_verify_name": row.get("e_verify_name"),
     }
     if row.get("api_id") is not None:
-        payload["api_id"] = int(row["api_id"])
+        job_id = int(row["api_id"])
+        payload["api_id"] = job_id
+        payload["job_id"] = job_id
     if include_raw:
         payload["raw_description"] = _parse_raw_description(row.get("raw_description"))
     return payload
@@ -938,6 +993,55 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
 
 def _job_from_row(row: dict) -> dict:
     return _job_payload(row, include_raw=True)
+
+
+def attach_raw_descriptions(jobs: list[dict]) -> None:
+    """Fill raw_description from MySQL for these rows only."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for job in jobs:
+        try:
+            job_id = int(job["api_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if job_id not in seen:
+            seen.add(job_id)
+            ids.append(job_id)
+    found = _raw_descriptions_by_id(ids)
+    for job in jobs:
+        try:
+            job_id = int(job["api_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if job_id in found:
+            job["raw_description"] = found[job_id]
+        else:
+            job["raw_description"] = source_extras(job.get("raw_description"))
+
+
+def _raw_descriptions_by_id(ids: list[int]) -> dict[int, object]:
+    if not ids or not mysql_configured():
+        return {}
+    found: dict[int, object] = {}
+    conn = get_conn()
+    if conn is None:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            for start in range(0, len(ids), 100):
+                chunk = ids[start : start + 100]
+                slots = ", ".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"SELECT id, raw_description FROM {JOBS_TABLE} WHERE id IN ({slots})",
+                    chunk,
+                )
+                for row in cur.fetchall() or []:
+                    found[int(row["id"])] = _parse_raw_description(row.get("raw_description"))
+        return found
+    except Exception:
+        close_conn()
+        log.exception("raw_description lookup failed")
+        return found
 
 
 def load_jobs() -> list[dict]:
@@ -949,6 +1053,8 @@ def load_jobs() -> list[dict]:
         if conn is None:
             return []
         with conn.cursor() as cur:
+            # raw_description stays off this query. It is a LONGTEXT, and loading it
+            # for every row stalls MySQL. The jobs API fills it for the current page.
             cur.execute(
                 f"SELECT id AS api_id, "
                 f"COALESCE(NULLIF(source_id, ''), public_id, CAST(id AS CHAR)) AS id, "
@@ -1648,6 +1754,261 @@ def enrich_jobs_everify(*, only_unknown: bool = False) -> dict:
         "unknown": 0,
         "employers": employers,
     }
+
+
+def _resolved_h1b(company: object, inferred: object) -> str:
+    """Posting text wins when it refuses sponsorship. A known sponsor fills unknown."""
+    current = str(inferred or "unknown").strip().lower() or "unknown"
+    if current == "no":
+        return "no"
+    if current == "yes":
+        return "yes"
+    if _company_h1b_note(company):
+        return "yes"
+    return "unknown"
+
+
+def _company_h1b_note(company: object) -> str:
+    from jobscraper.h1b_sponsors import match_sponsor
+
+    hit = match_sponsor(str(company or ""), h1b_index())
+    if not hit:
+        return ""
+    first = int(hit.get("first_fiscal_year") or 0)
+    last = int(hit.get("last_fiscal_year") or 0)
+    approvals = int(hit.get("approvals") or 0)
+    if first and last:
+        span = str(first) if first == last else f"{first}-{last}"
+        return f"USCIS H-1B approvals FY{span}: {approvals}"[:255]
+    return f"USCIS H-1B approvals: {approvals}"[:255]
+
+
+def _mark_company_h1b(cur, company_id: int, name: str) -> None:
+    note = _company_h1b_note(name)
+    if not note:
+        return
+    try:
+        cur.execute(
+            "UPDATE companies SET h1b_sponsor = 1, "
+            "sponsorship_notes = IF(sponsorship_notes IS NULL OR sponsorship_notes = '', %s, sponsorship_notes) "
+            "WHERE id = %s AND (h1b_sponsor IS NULL OR h1b_sponsor = 0)",
+            (note, company_id),
+        )
+    except Exception:
+        log.debug("companies.h1b_sponsor was not updated for %s", name)
+
+
+def _long_conn():
+    cfg = mysql_config()
+    if not cfg:
+        return None
+    tuned = dict(cfg)
+    tuned["read_timeout"] = 300
+    tuned["write_timeout"] = 300
+    conn = _connect(tuned)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION max_execution_time=0")
+            cur.execute("SET SESSION wait_timeout=600")
+    except Exception:
+        pass
+    return conn
+
+
+def h1b_count() -> int:
+    if not mysql_configured():
+        return 0
+    try:
+        conn = get_conn()
+        if conn is None:
+            return 0
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) AS n FROM {H1B_TABLE}")
+            row = cur.fetchone() or {}
+        return int(row.get("n") or 0)
+    except Exception:
+        close_conn()
+        return 0
+
+
+def replace_h1b_sponsors(rows: list[dict]) -> int:
+    global _H1B_INDEX
+    from jobscraper.h1b_sponsors import build_index
+
+    if not mysql_configured():
+        return 0
+    conn = _long_conn()
+    if conn is None:
+        return 0
+    try:
+        conn.autocommit(False)
+    except Exception:
+        pass
+    payload = [
+        (
+            str(row.get("name_key") or "")[:255],
+            str(row.get("employer") or "")[:512],
+            int(row.get("approvals") or 0),
+            int(row.get("denials") or 0),
+            int(row.get("first_fiscal_year") or 0),
+            int(row.get("last_fiscal_year") or 0),
+        )
+        for row in rows
+        if str(row.get("name_key") or "") and int(row.get("approvals") or 0) > 0
+    ]
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {H1B_TABLE}")
+            for start in range(0, len(payload), 1000):
+                chunk = payload[start : start + 1000]
+                cur.executemany(
+                    f"INSERT INTO {H1B_TABLE} "
+                    "(name_key, employer, approvals, denials, first_fiscal_year, last_fiscal_year) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    chunk,
+                )
+            conn.commit()
+        _H1B_INDEX = build_index(rows)
+        return len(payload)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        log.exception("H-1B sponsor import failed")
+        raise
+    finally:
+        conn.close()
+
+
+def h1b_index() -> dict:
+    global _H1B_INDEX
+    from jobscraper.h1b_sponsors import build_index
+
+    if _H1B_INDEX is not None:
+        return _H1B_INDEX
+    rows: list[dict] = []
+    conn = _long_conn()
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT name_key, employer, approvals, denials, "
+                    f"first_fiscal_year, last_fiscal_year FROM {H1B_TABLE}"
+                )
+                rows = list(cur.fetchall() or [])
+        except Exception:
+            log.exception("H-1B sponsor index was not loaded")
+            rows = []
+        finally:
+            conn.close()
+    built = build_index(rows)
+    if rows:
+        _H1B_INDEX = built
+    return built
+
+
+def enrich_jobs_h1b() -> dict:
+    """Set h1b_sponsorship to yes when the employer has a USCIS approval and the posting does not refuse it."""
+    from jobscraper.h1b_sponsors import match_sponsor
+
+    empty = {"jobs_updated": 0, "companies_updated": 0, "employers": 0}
+    if not mysql_configured():
+        return empty
+    index = h1b_index()
+    employers = h1b_count()
+    if employers <= 0 or not index:
+        return empty
+    conn = _long_conn()
+    if conn is None:
+        return empty
+    jobs_updated = 0
+    companies_updated = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, company FROM {JOBS_TABLE} "
+                f"WHERE h1b_sponsorship IS NULL OR h1b_sponsorship = '' "
+                f"OR LOWER(h1b_sponsorship) = 'unknown'"
+            )
+            job_ids = []
+            for job in cur.fetchall() or []:
+                if match_sponsor(job.get("company") or "", index):
+                    job_ids.append(int(job["id"]))
+            for start in range(0, len(job_ids), 400):
+                chunk = job_ids[start : start + 400]
+                slots = ", ".join(["%s"] * len(chunk))
+                cur.execute(
+                    f"UPDATE {JOBS_TABLE} SET h1b_sponsorship = 'yes' "
+                    f"WHERE id IN ({slots}) AND LOWER(h1b_sponsorship) <> 'no'",
+                    chunk,
+                )
+                jobs_updated += int(cur.rowcount or 0)
+            try:
+                cur.execute("SELECT id, name FROM companies")
+                company_ids = []
+                for company in cur.fetchall() or []:
+                    if match_sponsor(company.get("name") or "", index):
+                        company_ids.append(int(company["id"]))
+                note = "USCIS H-1B Employer Data Hub approval"
+                for start in range(0, len(company_ids), 400):
+                    chunk = company_ids[start : start + 400]
+                    slots = ", ".join(["%s"] * len(chunk))
+                    cur.execute(
+                        "UPDATE companies SET h1b_sponsor = 1, "
+                        "sponsorship_notes = IF(sponsorship_notes IS NULL OR sponsorship_notes = '', %s, sponsorship_notes) "
+                        f"WHERE id IN ({slots}) AND (h1b_sponsor IS NULL OR h1b_sponsor = 0)",
+                        [note, *chunk],
+                    )
+                    companies_updated += int(cur.rowcount or 0)
+            except Exception:
+                log.exception("Could not mark companies.h1b_sponsor")
+    except Exception:
+        log.exception("H-1B job enrich failed")
+        return empty
+    finally:
+        conn.close()
+    return {
+        "jobs_updated": jobs_updated,
+        "companies_updated": companies_updated,
+        "employers": employers,
+    }
+
+
+def ensure_h1b_sponsors() -> dict:
+    """Load USCIS sponsor companies when the table is empty, then mark matching jobs."""
+    from jobscraper.h1b_sponsors import collect_sponsors
+
+    with _H1B_LOAD_LOCK:
+        if not mysql_configured():
+            return {"employers": 0, "downloaded": False, "jobs_updated": 0, "companies_updated": 0}
+        init_db()
+        downloaded = False
+        employers = h1b_count()
+        if employers < 1000:
+            rows = collect_sponsors()
+            if rows:
+                employers = replace_h1b_sponsors(rows)
+                downloaded = True
+                log.info("Saved %s H-1B sponsor companies", employers)
+        global _H1B_INDEX
+        _H1B_INDEX = None
+        stats = enrich_jobs_h1b()
+        stats["downloaded"] = downloaded
+        stats["employers"] = employers or stats.get("employers") or 0
+        return stats
+
+
+def start_h1b_sponsor_load() -> None:
+    global _H1B_LOAD_STARTED
+    if _H1B_LOAD_STARTED or not mysql_configured():
+        return
+    _H1B_LOAD_STARTED = True
+    threading.Thread(
+        target=ensure_h1b_sponsors,
+        name="h1b-sponsors",
+        daemon=True,
+    ).start()
 
 
 def health() -> dict:

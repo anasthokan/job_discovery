@@ -128,6 +128,11 @@
       padding: 8px 12px; font-size: 0.82rem; display: inline-flex; gap: 6px; align-items: center;
     }
     .filter-pill.active { border-color: #c7d2fe; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    .filter-select {
+      border: 1px solid var(--border); background: #fff; border-radius: 999px;
+      padding: 8px 12px; font: inherit; font-size: 0.82rem; color: var(--text);
+    }
+    .filter-select:focus { outline: 2px solid #c7d2fe; }
 
     .jobs-split-container {
       display: grid;
@@ -252,6 +257,7 @@
             <div class="sidebar-submenu" id="tools-submenu">
               <a href="/dashboard.html" class="sidebar-submenu-item"><span>USAJobs Agencies</span></a>
               <a href="/dashboard.html#series" class="sidebar-submenu-item"><span>Occupational Series</span></a>
+              <a href="/dashboard.html#greenhouse" class="sidebar-submenu-item"><span>Greenhouse Jobs</span></a>
             </div>
           </div>
         </nav>
@@ -280,6 +286,7 @@
                   <span class="tracker-total-label"><strong id="total-jobs-explorer-count">0</strong> <span id="list-kind-label">USAJOBS AGENCIES</span></span>
                   <button type="button" class="tracker-subtab active" data-list="agencies">Agencies</button>
                   <button type="button" class="tracker-subtab" data-list="series">Occupational Series</button>
+                  <button type="button" class="tracker-subtab" data-list="greenhouse">Greenhouse</button>
                 </div>
               </div>
             </div>
@@ -306,9 +313,13 @@
                 <button type="button" class="filter-pill active" id="filter-job-type-btn">
                   <span class="filter-btn-label" id="filter-kind-label">Federal Agency</span>
                 </button>
-                <button type="button" class="filter-pill" id="filter-h1b-btn">
-                  <span class="filter-btn-label">USAJobs</span>
+                <button type="button" class="filter-pill" id="filter-source-btn">
+                  <span class="filter-btn-label" id="filter-source-label">USAJobs</span>
                 </button>
+                <label class="filter-pill" id="greenhouse-board-wrap" hidden>
+                  <span>Board</span>
+                  <select id="greenhouse-board" class="filter-select" aria-label="Greenhouse board"></select>
+                </label>
               </div>
             </div>
 
@@ -370,28 +381,64 @@
       "http://localhost:9001",
       "http://localhost:8000",
     ];
+    const GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards";
+    const GREENHOUSE_BOARDS = [
+      "stripe", "airbnb", "discord", "figma", "cloudflare", "databricks", "reddit", "dropbox",
+      "pinterest", "instacart", "robinhood", "coinbase", "gitlab", "hashicorp", "mongodb", "datadog",
+      "snowflake", "twilio", "okta", "shopify", "doordash", "lyft", "spotify", "block", "affirm",
+      "plaid", "brex", "airtable", "asana", "duolingo", "zendesk", "hubspot", "cloudkitchens",
+      "rippling", "scaleai", "anduril", "chime", "sofi", "nvidia", "anthropic", "flexport", "gusto",
+      "calendly", "intercom", "coursera", "elastic", "confluent", "sentry", "checkr", "carta",
+      "lattice", "mozilla", "github", "zapier", "pagerduty", "1password", "cruise", "webflow",
+      "postman", "grammarly",
+    ];
 
     const LIST_META = {
       agencies: {
         path: "/api/usajobs/agencies",
         label: "USAJOBS AGENCIES",
         kind: "Federal Agency",
+        source: "USAJobs",
         empty: "No agencies match these tags.",
+        placeholder: "Find an agency (press Enter to add tags)",
+        locationLabel: "United States",
       },
       series: {
         path: "/api/usajobs/series",
         label: "OCCUPATIONAL SERIES",
         kind: "Occupational Series",
+        source: "USAJobs",
         empty: "No series match these tags.",
+        placeholder: "Find a series (press Enter to add tags)",
+        locationLabel: "United States",
+      },
+      greenhouse: {
+        label: "GREENHOUSE JOBS",
+        kind: "Greenhouse",
+        source: "Greenhouse",
+        empty: "No Greenhouse jobs match these tags.",
+        placeholder: "Find a Greenhouse job (press Enter to add tags)",
+        locationLabel: "All locations",
       },
     };
 
-    let currentList = location.hash === "#series" ? "series" : "agencies";
-    let lists = { agencies: [], series: [] };
+    const boardSelect = document.getElementById("greenhouse-board");
+    const boardWrap = document.getElementById("greenhouse-board-wrap");
+    let currentList = listFromHash();
+    let lists = { agencies: [], series: [], greenhouse: [] };
+    let greenhouseBoards = [];
+    let greenhouseBoard = "stripe";
+    let greenhouseReq = 0;
+    let detailReq = 0;
     let jobs = [];
     let filtered = [];
     let tags = [];
     let selectedId = null;
+
+    function listFromHash() {
+      const hash = location.hash.replace("#", "");
+      return LIST_META[hash] ? hash : "agencies";
+    }
 
     function apiBases() {
       const override = new URLSearchParams(location.search).get("api");
@@ -458,7 +505,7 @@
 
     function matchesTags(job) {
       if (!tags.length) return true;
-      const blob = `${job.title || ""} ${job.company || ""} ${(job.skills || []).join(" ")}`.toLowerCase();
+      const blob = `${job.title || ""} ${job.company || ""} ${job.location || ""} ${(job.skills || []).join(" ")} ${(job.departments || []).join(" ")}`.toLowerCase();
       return tags.every((tag) => blob.includes(tag));
     }
 
@@ -471,12 +518,22 @@
 
     function setActiveList(listName, { resetSelection = true } = {}) {
       currentList = LIST_META[listName] ? listName : "agencies";
+      const meta = LIST_META[currentList];
       jobs = lists[currentList] || [];
-      document.getElementById("list-kind-label").textContent = LIST_META[currentList].label;
-      document.getElementById("filter-kind-label").textContent = LIST_META[currentList].kind;
+      document.getElementById("list-kind-label").textContent = meta.label;
+      document.getElementById("filter-kind-label").textContent = meta.kind;
+      document.getElementById("filter-source-label").textContent = meta.source;
+      document.querySelector("#filter-location-btn .filter-btn-label").textContent = meta.locationLabel;
+      searchInput.placeholder = meta.placeholder;
+      boardWrap.hidden = currentList !== "greenhouse";
+      document.getElementById("filter-source-btn").hidden = currentList === "greenhouse";
       document.querySelectorAll(".tracker-subtab").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.list === currentList);
       });
+      const nextHash = currentList === "agencies" ? "" : `#${currentList}`;
+      if (location.hash !== nextHash) {
+        history.replaceState(null, "", `${location.pathname}${location.search}${nextHash}`);
+      }
       if (resetSelection) selectedId = null;
       applyFilters();
     }
@@ -499,6 +556,9 @@
       }
       listEl.innerHTML = filtered.map((job, index) => {
         const code = job.series_code || job.agency_code || "";
+        const foot = job.list_type === "greenhouse"
+          ? `${(job.posted_at || "").slice(0, 10) || "Greenhouse"} · ${job.board || ""}`
+          : `${code} · ${(job.posted_at || "").slice(0, 10) || "USAJobs"}`;
         return `
         <div class="job-list-card ${job.id === selectedId ? "active" : ""}" data-id="${escapeHtml(job.id)}" role="button" tabindex="0">
           <div class="job-card-logo ${logoClass(index)}"><span class="logo-initial">${escapeHtml(initial(job))}</span></div>
@@ -506,7 +566,7 @@
             <h3 class="job-card-title">${escapeHtml(job.title)}</h3>
             <div class="job-card-company">${escapeHtml(job.company)}</div>
             <div class="job-card-meta">${escapeHtml(job.location || "United States")} · ${escapeHtml(LIST_META[currentList].kind)}</div>
-            <div class="job-card-pay">${escapeHtml(code)} · ${escapeHtml((job.posted_at || "").slice(0, 10) || "USAJobs")}</div>
+            <div class="job-card-pay">${escapeHtml(foot)}</div>
           </div>
         </div>
       `;
@@ -517,11 +577,94 @@
       return filtered.find((job) => job.id === selectedId) || null;
     }
 
+    function descriptionHtml(text) {
+      const blocks = String(text || "").split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+      if (!blocks.length) {
+        return `<p class="description-text">No description was published for this role.</p>`;
+      }
+      return blocks.map((block) => {
+        const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+        const bullets = lines.length > 0 && lines.every((line) => line.startsWith("•"));
+        if (bullets) {
+          return `<ul class="description-list">${lines.map((line) => `<li>${escapeHtml(line.replace(/^•\s*/, ""))}</li>`).join("")}</ul>`;
+        }
+        return `<p class="description-text">${escapeHtml(lines.join(" "))}</p>`;
+      }).join("");
+    }
+
+    function chipList(items, emptyLabel) {
+      const rows = (items || []).filter(Boolean);
+      if (!rows.length) return `<div class="benefit-item">${escapeHtml(emptyLabel)}</div>`;
+      return rows.map((item) => `<div class="benefit-item">${escapeHtml(item)}</div>`).join("");
+    }
+
+    function paintGreenhouse(job, loading, errorText) {
+      applyBtn.href = job.url || "https://job-boards.greenhouse.io/";
+      const description = loading
+        ? `<p class="description-text">Loading the Greenhouse job description…</p>`
+        : (errorText ? `<p class="description-text">${escapeHtml(errorText)}</p>` : descriptionHtml(job.description));
+      detailEl.innerHTML = `
+        <div class="detail-top-info">
+          <div class="detail-company-header-row">
+            <div class="company-logo-sm bg-indigo">${escapeHtml(initial(job))}</div>
+            <span class="company-header-name">${escapeHtml(job.company)}</span>
+            <span class="company-header-dot">·</span>
+            <span class="company-header-time">${escapeHtml((job.posted_at || "").slice(0, 10) || "Greenhouse")}</span>
+          </div>
+          <h1 class="detail-job-title">${escapeHtml(job.title)}</h1>
+          <div class="job-tags-grid">
+            <div class="tag-grid-item"><span>${escapeHtml(job.location || "Location not listed")}</span></div>
+            <div class="tag-grid-item"><span>Greenhouse · ${escapeHtml(job.board || greenhouseBoard)}</span></div>
+            <div class="tag-grid-item"><span>Job ${escapeHtml(job.greenhouse_id || "—")}</span></div>
+            <div class="tag-grid-item"><span>${escapeHtml(job.requisition_id || "No requisition id")}</span></div>
+          </div>
+          <div class="compensation-box">
+            <div class="comp-label">Role</div>
+            <div class="comp-amount"><strong>${escapeHtml(job.company)}</strong> · ${escapeHtml(job.title)}</div>
+          </div>
+          <div class="benefits-box">
+            <div class="benefits-title">Departments</div>
+            <div class="benefits-grid">${chipList(job.departments, loading ? "Loading departments…" : "No department listed")}</div>
+          </div>
+          <div class="benefits-box">
+            <div class="benefits-title">Offices</div>
+            <div class="benefits-grid">${chipList(job.offices, loading ? "Loading offices…" : "No office listed")}</div>
+          </div>
+          <div class="card widget-card job-description-card">
+            <div class="job-description-content">
+              <h3 class="description-section-title">Job description</h3>
+              ${description}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
     function renderDetail() {
+      const token = ++detailReq;
       const job = selectedJob();
       if (!job) {
         detailEl.innerHTML = `<div class="empty-state">Select a listing from the list.</div>`;
-        applyBtn.href = "https://www.usajobs.gov/";
+        applyBtn.href = currentList === "greenhouse" ? "https://job-boards.greenhouse.io/" : "https://www.usajobs.gov/";
+        return;
+      }
+      if (job.list_type === "greenhouse") {
+        const needsDetail = job.description == null;
+        paintGreenhouse(job, needsDetail);
+        if (!needsDetail) return;
+        fetchGreenhouseJob(job.board || greenhouseBoard, job.greenhouse_id)
+          .then((full) => {
+            if (token !== detailReq) return;
+            Object.assign(job, full);
+            if (selectedId === job.id) paintGreenhouse(job, false);
+          })
+          .catch(() => {
+            if (token !== detailReq) return;
+            job.description = "";
+            if (selectedId === job.id) {
+              paintGreenhouse(job, false, "Could not load this Greenhouse job description.");
+            }
+          });
         return;
       }
       applyBtn.href = job.url || "https://www.usajobs.gov/";
@@ -614,19 +757,125 @@
       toolsWrap.classList.toggle("open");
     });
 
-    async function fetchList(listName) {
+    function boardLabel(token) {
+      return String(token || "").replace(/-/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function htmlToText(value) {
+      let text = String(value || "");
+      const box = document.createElement("textarea");
+      for (let i = 0; i < 2; i += 1) {
+        box.innerHTML = text;
+        if (box.value === text) break;
+        text = box.value;
+      }
+      return text
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<\/(p|div|h[1-6]|tr)>/gi, "\n\n")
+        .replace(/<\/li>/gi, "\n")
+        .replace(/<li[^>]*>/gi, "• ")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\u00a0/g, " ")
+        .replace(/[ \t]+\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
+
+    function mapGreenhouseJob(row, board, includeContent = false) {
+      const location = String((row.location && row.location.name) || "").trim();
+      const departments = (row.departments || []).map((item) => item && item.name).filter(Boolean);
+      const offices = (row.offices || []).map((item) => item && item.name).filter(Boolean);
+      const posted = row.updated_at || row.first_published || "";
+      const job = {
+        id: `greenhouse-${board}-${row.id}`,
+        greenhouse_id: row.id,
+        board,
+        title: String(row.title || "").trim() || "Untitled role",
+        company: String(row.company_name || "").trim() || boardLabel(board),
+        skills: departments.length ? departments : location.split(",").map((part) => part.trim()).filter(Boolean),
+        location: location || "Location not listed",
+        platform: "Greenhouse",
+        list_type: "greenhouse",
+        url: row.absolute_url || "",
+        posted_at: posted || null,
+        requisition_id: row.requisition_id || null,
+        departments,
+        offices,
+      };
+      if (includeContent) job.description = htmlToText(row.content || "");
+      return job;
+    }
+
+    async function fetchGreenhouseJson(url) {
+      const res = await fetch(url);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || data.message || `Greenhouse returned HTTP ${res.status}`);
+      return data;
+    }
+
+    function fetchGreenhouseJob(board, jobId) {
+      const url = `${GREENHOUSE_API}/${encodeURIComponent(board)}/jobs/${encodeURIComponent(jobId)}`;
+      return fetchGreenhouseJson(url).then((row) => mapGreenhouseJob(row, board, true));
+    }
+
+    async function fetchJson(path) {
+      let lastError = null;
       for (const base of apiBases()) {
-        const url = `${base}${LIST_META[listName].path}`;
         try {
-          const res = await fetch(url);
+          const res = await fetch(`${base}${path}`);
           const data = await res.json();
           if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-          return mapPayload(data, listName);
+          return data;
         } catch (err) {
-          /* try next base */
+          lastError = err;
         }
       }
-      throw new Error(listName);
+      throw lastError || new Error(path);
+    }
+
+    async function fetchList(listName) {
+      const data = await fetchJson(LIST_META[listName].path);
+      return mapPayload(data, listName);
+    }
+
+    function fillBoardSelect() {
+      const tokens = greenhouseBoards.map((row) => row.token);
+      if (tokens.length && !tokens.includes(greenhouseBoard)) greenhouseBoard = tokens[0];
+      boardSelect.innerHTML = greenhouseBoards.map((row) => (
+        `<option value="${escapeHtml(row.token)}">${escapeHtml(row.name || row.token)}</option>`
+      )).join("");
+      if (greenhouseBoard) boardSelect.value = greenhouseBoard;
+    }
+
+    async function loadGreenhouse(board) {
+      const nextBoard = board || greenhouseBoard || "stripe";
+      if (lists.greenhouse.length && lists.greenhouse[0]?.board === nextBoard) {
+        greenhouseBoard = nextBoard;
+        setActiveList("greenhouse", { resetSelection: currentList !== "greenhouse" });
+        return;
+      }
+      const req = ++greenhouseReq;
+      greenhouseBoard = nextBoard;
+      currentList = "greenhouse";
+      document.querySelectorAll(".tracker-subtab").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.list === "greenhouse");
+      });
+      boardWrap.hidden = false;
+      document.getElementById("filter-source-btn").hidden = true;
+      setStatus(`Loading Greenhouse jobs for ${greenhouseBoard}…`);
+      listEl.innerHTML = `<div class="loading-state">Loading Greenhouse jobs…</div>`;
+      detailEl.innerHTML = `<div class="empty-state">Loading Greenhouse jobs…</div>`;
+      try {
+        const data = await fetchGreenhouseJson(`${GREENHOUSE_API}/${encodeURIComponent(greenhouseBoard)}/jobs`);
+        if (req !== greenhouseReq || currentList !== "greenhouse") return;
+        lists.greenhouse = (data.jobs || []).map((row) => mapGreenhouseJob(row, greenhouseBoard));
+        setStatus(`Loaded ${lists.greenhouse.length} Greenhouse jobs from ${greenhouseBoard}.`);
+        setActiveList("greenhouse", { resetSelection: true });
+      } catch (err) {
+        if (req !== greenhouseReq || currentList !== "greenhouse") return;
+        setStatus(`Could not load Greenhouse jobs for ${greenhouseBoard}.`, true);
+        listEl.innerHTML = `<div class="empty-state">Greenhouse did not return jobs for this board.</div>`;
+      }
     }
 
     async function loadLists() {
@@ -637,19 +886,42 @@
         ]);
         lists.agencies = agencies;
         lists.series = series;
+        if (currentList === "greenhouse") return;
         setStatus(`Loaded ${agencies.length} agencies and ${series.length} occupational series from USAJobs.`);
         setActiveList(currentList, { resetSelection: true });
       } catch (err) {
+        if (currentList === "greenhouse") return;
         setStatus("Failed to fetch. Start the API and open http://127.0.0.1:9001/dashboard.html", true);
         listEl.innerHTML = `<div class="empty-state">Could not load USAJobs lists.<br><br>Run <code>python -m uvicorn api:app --host 127.0.0.1 --port 9001</code><br>then open <a href="http://127.0.0.1:9001/dashboard.html">http://127.0.0.1:9001/dashboard.html</a></div>`;
       }
     }
 
     document.querySelectorAll(".tracker-subtab").forEach((btn) => {
-      btn.addEventListener("click", () => setActiveList(btn.dataset.list));
+      btn.addEventListener("click", () => {
+        if (btn.dataset.list === "greenhouse") {
+          loadGreenhouse(boardSelect.value || greenhouseBoard);
+          return;
+        }
+        setActiveList(btn.dataset.list);
+      });
     });
 
+    boardSelect.addEventListener("change", () => {
+      lists.greenhouse = [];
+      loadGreenhouse(boardSelect.value);
+    });
+
+    window.addEventListener("hashchange", () => {
+      const next = listFromHash();
+      if (next === currentList) return;
+      if (next === "greenhouse") loadGreenhouse(boardSelect.value || greenhouseBoard);
+      else setActiveList(next);
+    });
+
+    greenhouseBoards = GREENHOUSE_BOARDS.map((token) => ({ token, name: boardLabel(token) }));
+    fillBoardSelect();
     loadLists();
+    if (currentList === "greenhouse") loadGreenhouse(greenhouseBoard);
   </script>
 </body>
 

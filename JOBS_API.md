@@ -75,7 +75,7 @@ Query flags:
 | `work_model` | `""` | Comma-separated: `remote`, `hybrid`, `onsite` |
 | `job_type` | `""` | Comma-separated: `fulltime`, `contract`, `parttime`, `internship` |
 | `experience_level` | `""` | Comma-separated: `Intern/New Grad`, `Entry Level`, `Mid Level`, `Senior Level`, `Lead/Staff`, `Director/Executive` |
-| `h1b_sponsorship` | `""` | `yes` or `no`. `unknown` means the posting never says |
+| `h1b_sponsorship` | `""` | `yes` or `no`. `yes` means the posting offers sponsorship, or the company has a USCIS H-1B approval (FY2009–FY2023). `no` means the posting says it will not sponsor. `unknown` means neither source says |
 | `clearance_required` | `""` | `yes` or `no` |
 | `us_citizen_required` | `""` | `yes` or `no`. `yes` = posting demands US citizenship |
 | `years` | omit | Candidate years. Drops jobs that require more. Jobs with no stated years stay |
@@ -159,7 +159,7 @@ const res = await fetch(`${BASE_URL}/api/recommend/${candidateId}?limit=20`);
 const data = await res.json();
 if (!res.ok) throw new Error(data.detail || "Recommend failed");
 // data.candidate_id, data.skills, data.filters, data.jobs
-// data.jobs[0].api_id is ezyjob.jobs.id — use this in the app
+// data.jobs[0].job_id is ezyjob.jobs.id — use this in the app
 // data.jobs[0].id is the board source id
 ```
 
@@ -260,6 +260,7 @@ HTTP `200`:
     {
       "id": "remotive-1680495",
       "api_id": 1842,
+      "job_id": 1842,
       "title": "Senior Backend Engineer",
       "company": "Northwind Labs",
       "skills": ["Python", "FastAPI", "AWS"],
@@ -278,7 +279,12 @@ HTTP `200`:
       "us_citizen_required": "no",
       "posted_at": "2026-09-15",
       "e_verified": "unknown",
-      "e_verify_name": null
+      "e_verify_name": null,
+      "raw_description": {
+        "salary": "$140,000 - $180,000",
+        "categories": ["Engineering"],
+        "applicationLink": "https://boards.example/apply/1680495"
+      }
     }
   ],
   "count": 1,
@@ -300,11 +306,13 @@ HTTP `200`:
 
 `count` is the jobs in this page. `total` is every match for the filters. `pagination.page` starts at 1. Request `page=2` (or `offset=20` with the same `limit`) for the next page.
 
-`api_id` is the numeric `jobs.id` primary key in the ezyjob database. Use that id in the app. `id` stays the board source id (`remotive-1680495`) and still works as `job_id` on `/api/cv/from-job`. `/api/cv/from-job` also accepts `api_id`.
+`job_id` and `api_id` are the same numeric `jobs.id` primary key. Use `job_id` in the app. `id` stays the board source id (`remotive-1680495`). `/api/cv/from-job` accepts that source id or this numeric id.
+
+`raw_description` is always an object. It holds the scraped fields that are not already saved in our columns (`title`, `company`, `description`, `url`, and the other listing fields). `{}` means the board sent nothing beyond those columns. `/api/jobs` loads it for the current page only, up to 200 jobs.
 
 Missing fields may be `null` or `[]`. `url` is the apply / posting link. `daysAgo` is a label such as `just now`, `2 min ago`, `1 hour ago`, `7 days ago`, or `1 month ago`. Show that string as-is. The `days` query still filters by whole days.
 
-`work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, `clearance_required`, and `us_citizen_required` are saved on each row. They are read from the posting title, location, and description when the board does not send them. `unknown` means the posting never said. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
+`work_model`, `job_type`, `experience_level`, `years_experience`, `h1b_sponsorship`, `clearance_required`, and `us_citizen_required` are saved on each row. Work model, job type, experience, clearance, and citizenship are read from the posting. `h1b_sponsorship` is `yes` when the posting offers sponsorship, or when USCIS shows that company had at least one H-1B approval in fiscal years 2009–2023. A posting that says it will not sponsor stays `no`. `unknown` means the posting is silent and the company is not in that USCIS file. `years_experience` is `null` when no minimum is stated. Recommended jobs include the same fields.
 
 `us_citizen_required` is always `yes` or `no`, never `unknown`. It is `yes` when the posting says so ("must be a U.S. citizen", "US citizenship required", "U.S. citizens only") or asks for a Secret / Top Secret / TS/SCI clearance, which only citizens can hold. Everything else is `no`: citizen **or** green card / permanent resident, "U.S. person" (ITAR), visa sponsorship offered, H1B/OPT welcome, or no mention of citizenship at all.
 
@@ -321,6 +329,7 @@ HTTP `200`:
     {
       "id": "remotive-1680495",
       "api_id": 1842,
+      "job_id": 1842,
       "title": "Senior Backend Engineer",
       "company": "Northwind Labs",
       "skills": ["Python", "FastAPI", "AWS"],

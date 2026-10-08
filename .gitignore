@@ -4,6 +4,7 @@ __pycache__/
 .scrapy/
 data/*.json
 data/everify_employers.csv
+data/h1b/
 *.egg-info/
 .idea/
 .vscode/

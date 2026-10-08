@@ -74,10 +74,12 @@ from jobscraper.db import (
     last_scrape_meta,
     load_app_user,
     load_candidate as load_candidate_mysql,
+    attach_raw_descriptions,
     load_jobs as load_jobs_mysql,
     mysql_configured,
     save_candidate as save_candidate_mysql,
     replace_everify_employers,
+    start_h1b_sponsor_load,
     start_scrape_run,
     upsert_jobs,
 )
@@ -188,6 +190,7 @@ def _boot() -> None:
     try:
         init_mysql()
         import_json_if_empty(DATA_FILE)
+        start_h1b_sponsor_load()
     except Exception:
         log.exception("API boot failed")
     if _BOOT_STOP.is_set():
@@ -600,6 +603,8 @@ def _with_time_ago(jobs: list[dict]) -> list[dict]:
             fallback = 0
         row["daysAgo"] = format_time_ago(job.get("posted_at"), fallback)
         presented.append(row)
+    if len(presented) <= 200:
+        attach_raw_descriptions(presented)
     return presented
 
 
