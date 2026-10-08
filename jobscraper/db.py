@@ -983,9 +983,7 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "e_verify_name": row.get("e_verify_name"),
     }
     if row.get("api_id") is not None:
-        job_id = int(row["api_id"])
-        payload["api_id"] = job_id
-        payload["job_id"] = job_id
+        payload["job_id"] = int(row["api_id"])
     if include_raw:
         payload["raw_description"] = _parse_raw_description(row.get("raw_description"))
     return payload
@@ -1001,7 +999,7 @@ def attach_raw_descriptions(jobs: list[dict]) -> None:
     seen: set[int] = set()
     for job in jobs:
         try:
-            job_id = int(job["api_id"])
+            job_id = int(job["job_id"])
         except (KeyError, TypeError, ValueError):
             continue
         if job_id not in seen:
@@ -1010,7 +1008,7 @@ def attach_raw_descriptions(jobs: list[dict]) -> None:
     found = _raw_descriptions_by_id(ids)
     for job in jobs:
         try:
-            job_id = int(job["api_id"])
+            job_id = int(job["job_id"])
         except (KeyError, TypeError, ValueError):
             continue
         if job_id in found:

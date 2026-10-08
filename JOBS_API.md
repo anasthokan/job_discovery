@@ -259,7 +259,6 @@ HTTP `200`:
   "jobs": [
     {
       "id": "remotive-1680495",
-      "api_id": 1842,
       "job_id": 1842,
       "title": "Senior Backend Engineer",
       "company": "Northwind Labs",
@@ -306,7 +305,7 @@ HTTP `200`:
 
 `count` is the jobs in this page. `total` is every match for the filters. `pagination.page` starts at 1. Request `page=2` (or `offset=20` with the same `limit`) for the next page.
 
-`job_id` and `api_id` are the same numeric `jobs.id` primary key. Use `job_id` in the app. `id` stays the board source id (`remotive-1680495`). `/api/cv/from-job` accepts that source id or this numeric id.
+`job_id` is the numeric `jobs.id` primary key. Use that in the app. `id` stays the board source id (`remotive-1680495`). `/api/cv/from-job` accepts that source id or this numeric id.
 
 `raw_description` is always an object. It holds the scraped fields that are not already saved in our columns (`title`, `company`, `description`, `url`, and the other listing fields). `{}` means the board sent nothing beyond those columns. `/api/jobs` loads it for the current page only, up to 200 jobs.
 
@@ -328,7 +327,6 @@ HTTP `200`:
   "jobs": [
     {
       "id": "remotive-1680495",
-      "api_id": 1842,
       "job_id": 1842,
       "title": "Senior Backend Engineer",
       "company": "Northwind Labs",

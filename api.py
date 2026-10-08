@@ -1891,7 +1891,7 @@ def _job_from_cache(job_id: str | None) -> dict | None:
         return None
     wanted = job_id.strip().lower()
     for job in load_jobs():
-        if str(job.get("id") or "").lower() == wanted or str(job.get("api_id") or "") == wanted:
+        if str(job.get("id") or "").lower() == wanted or str(job.get("job_id") or "") == wanted:
             return job
     raise HTTPException(status_code=404, detail=f"No scraped job found for id '{job_id}'.")
 
