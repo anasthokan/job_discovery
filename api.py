@@ -504,6 +504,8 @@ def load_jobs() -> list[dict]:
         rows = load_jobs_mysql()
         if rows:
             return rows
+    from jobscraper.salary import salary_bounds
+
     annotated = []
     for job in load_jobs_json():
         fields = infer_listing_fields(
@@ -515,6 +517,9 @@ def load_jobs() -> list[dict]:
         )
         row = dict(job)
         row.update(fields)
+        salary_min, salary_max = salary_bounds(row)
+        row["salaryMin"] = salary_min
+        row["salaryMax"] = salary_max
         annotated.append(row)
     return annotated
 

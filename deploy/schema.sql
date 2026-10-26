@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS jobs (
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
   us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
+  salary_min INT NULL,
+  salary_max INT NULL,
+  salary_parsed TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)

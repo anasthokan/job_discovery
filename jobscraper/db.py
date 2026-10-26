@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   clearance_required VARCHAR(16) NOT NULL DEFAULT 'unknown',
   us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no',
   listing_inferred TINYINT(1) NOT NULL DEFAULT 0,
+  salary_min INT NULL,
+  salary_max INT NULL,
+  salary_parsed TINYINT(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)
@@ -115,6 +118,24 @@ CREATE TABLE IF NOT EXISTS {CANDIDATES_TABLE} (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 """
 
+CREATE_COMPANIES_SQL = """
+CREATE TABLE IF NOT EXISTS companies (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  public_id CHAR(32) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  normalized_name VARCHAR(255) NOT NULL,
+  website VARCHAR(512) NOT NULL DEFAULT '',
+  h1b_sponsor TINYINT(1) NULL,
+  sponsorship_notes VARCHAR(255) NOT NULL DEFAULT '',
+  logo_url VARCHAR(1000) NOT NULL DEFAULT '',
+  created_at DATETIME(6) NOT NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_companies_public_id (public_id),
+  UNIQUE KEY uk_companies_normalized_name (normalized_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+"""
+
 CREATE_RUNS_SQL = f"""
 CREATE TABLE IF NOT EXISTS {RUNS_TABLE} (
   id BIGINT NOT NULL AUTO_INCREMENT,
@@ -137,12 +158,13 @@ INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, raw_description, posted_at, is_active, e_verified, e_verify_name,
   job_type, work_model, experience_level, years_experience, h1b_sponsorship, clearance_required,
-  us_citizen_required, listing_inferred, first_seen_at, last_seen_at, created_at, updated_at
+  us_citizen_required, listing_inferred, salary_min, salary_max, salary_parsed,
+  first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, %s, 1, 'unknown', '',
   %s, %s, %s, %s, %s, %s,
-  %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, 1, %s, %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -189,6 +211,9 @@ ON DUPLICATE KEY UPDATE
   ),
   clearance_required = new.clearance_required,
   us_citizen_required = new.us_citizen_required,
+  salary_min = COALESCE(new.salary_min, {JOBS_TABLE}.salary_min),
+  salary_max = COALESCE(new.salary_max, {JOBS_TABLE}.salary_max),
+  salary_parsed = 1,
   listing_inferred = 1,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
@@ -366,6 +391,14 @@ def _ensure_job_columns(cur) -> None:
             "ADD COLUMN us_citizen_required VARCHAR(16) NOT NULL DEFAULT 'no'"
         )
         cur.execute(f"UPDATE {JOBS_TABLE} SET listing_inferred = 0")
+    for name, ddl in (
+        ("salary_min", "INT NULL"),
+        ("salary_max", "INT NULL"),
+        ("salary_parsed", "TINYINT(1) NOT NULL DEFAULT 0"),
+    ):
+        cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
+        if not cur.fetchone():
+            cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -384,12 +417,14 @@ def init_db() -> bool:
             return False
         with conn.cursor() as cur:
             cur.execute(CREATE_JOBS_SQL)
+            cur.execute(CREATE_COMPANIES_SQL)
             cur.execute(CREATE_RUNS_SQL)
             cur.execute(CREATE_EVERIFY_SQL)
             cur.execute(CREATE_H1B_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
+        start_salary_backfill()
         return True
     except Exception:
         close_conn()
@@ -448,6 +483,89 @@ def backfill_listing_fields() -> int:
         close_conn()
         log.exception("Listing field backfill failed")
         return 0
+
+
+_SALARY_BACKFILL_STARTED = False
+
+
+def backfill_salaries() -> int:
+    """Fill salary_min and salary_max from listings saved before those columns were parsed."""
+    if not mysql_configured():
+        return 0
+    from jobscraper.salary import salary_bounds
+
+    cfg = mysql_config()
+    if not cfg:
+        return 0
+    tuned = dict(cfg)
+    tuned["read_timeout"] = 120
+    tuned["write_timeout"] = 120
+    conn = None
+    updated = 0
+    examined = 0
+    last_id = 0
+    try:
+        conn = _connect(tuned)
+        _tune_session(conn)
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SET SESSION max_execution_time=120000")
+            except Exception:
+                pass
+        while True:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id, title, LEFT(description, 12000) AS description, raw_description "
+                    f"FROM {JOBS_TABLE} WHERE id > %s AND salary_parsed = 0 ORDER BY id LIMIT 20",
+                    (last_id,),
+                )
+                rows = list(cur.fetchall() or [])
+            if not rows:
+                break
+            payload = []
+            for row in rows:
+                last_id = int(row["id"])
+                examined += 1
+                low, high = salary_bounds(
+                    {
+                        "title": row.get("title") or "",
+                        "description": row.get("description") or "",
+                        "raw_description": row.get("raw_description") or "",
+                    }
+                )
+                if low is not None or high is not None:
+                    updated += 1
+                payload.append((low, high, last_id))
+            with conn.cursor() as cur:
+                cur.executemany(
+                    f"UPDATE {JOBS_TABLE} SET salary_min=%s, salary_max=%s, salary_parsed=1 "
+                    f"WHERE id=%s AND salary_parsed=0",
+                    payload,
+                )
+        log.info("Backfilled salary on %s of %s jobs", updated, examined)
+        return updated
+    except Exception:
+        log.exception("Salary backfill failed")
+        return updated
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def start_salary_backfill() -> None:
+    """Read salary off jobs already stored. One pass per process, off the request path."""
+    global _SALARY_BACKFILL_STARTED
+    if _SALARY_BACKFILL_STARTED or not mysql_configured():
+        return
+    _SALARY_BACKFILL_STARTED = True
+    threading.Thread(
+        target=backfill_salaries,
+        name="salary-backfill",
+        daemon=True,
+    ).start()
 
 
 def clear_copied_api_raw_descriptions() -> int:
@@ -795,6 +913,18 @@ def _raw_description_json(job: dict) -> str:
     return source_extras_json(raw)
 
 
+def _salary_amount(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
 def _years_value(value) -> int | None:
     if value is None or value == "":
         return None
@@ -832,7 +962,15 @@ def _row_from_item(job: dict) -> dict | None:
         "raw_description": _raw_description_json(job),
         "posted_at": _posted_mysql(job.get("posted_at")),
         **_listing_fields(job, description),
+        **_salary_fields(job),
     }
+
+
+def _salary_fields(job: dict) -> dict:
+    from jobscraper.salary import salary_bounds
+
+    salary_min, salary_max = salary_bounds(job)
+    return {"salary_min": salary_min, "salary_max": salary_max}
 
 
 def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
@@ -918,6 +1056,8 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["h1b_sponsorship"],
                         row["clearance_required"],
                         row["us_citizen_required"],
+                        row["salary_min"],
+                        row["salary_max"],
                     )
                     for row in rows
                 ]
@@ -1001,6 +1141,8 @@ def _job_payload(row: dict, *, include_raw: bool) -> dict:
         "h1b_sponsorship": row.get("h1b_sponsorship") or "unknown",
         "clearance_required": row.get("clearance_required") or "unknown",
         "us_citizen_required": "yes" if row.get("us_citizen_required") == "yes" else "no",
+        "salaryMin": _salary_amount(row.get("salary_min")),
+        "salaryMax": _salary_amount(row.get("salary_max")),
         "posted_at": posted,
         "e_verified": _as_e_verified(row.get("e_verified")),
         "e_verify_name": row.get("e_verify_name"),
@@ -1131,7 +1273,7 @@ def load_jobs() -> list[dict]:
                 f"days_ago, url, LEFT(description, 800) AS description, "
                 f"job_type, work_model, experience_level, "
                 f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
-                f"posted_at, e_verified, e_verify_name "
+                f"salary_min, salary_max, posted_at, e_verified, e_verify_name "
                 f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
             )
             rows = cur.fetchall() or []

@@ -21,3 +21,5 @@ class JobItem(scrapy.Item):
     h1b_sponsorship = scrapy.Field()
     clearance_required = scrapy.Field()
     us_citizen_required = scrapy.Field()
+    salaryMin = scrapy.Field()
+    salaryMax = scrapy.Field()

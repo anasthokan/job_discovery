@@ -39,6 +39,7 @@ from jobscraper.boards import (
 )
 from jobscraper.items import JobItem
 from jobscraper.job_fields import infer_listing_fields
+from jobscraper.salary import salary_bounds
 from jobscraper.jobspy_source import scrape as scrape_jobspy
 from jobscraper.jobspy_source import sites_for_platform
 from jobscraper.locations import muse_location, normalize_scraped_location, parse_state
@@ -499,6 +500,16 @@ class JobsSpider(scrapy.Spider):
         )
         for key, value in inferred.items():
             item[key] = value
+        salary_min, salary_max = salary_bounds(
+            {
+                "title": fields.get("title") or "",
+                "description": description,
+                "search_text": extra,
+                "raw": raw,
+            }
+        )
+        item["salaryMin"] = salary_min
+        item["salaryMax"] = salary_max
         yield item
 
     def parse_remoteok(self, response):
