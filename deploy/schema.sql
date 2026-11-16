@@ -82,3 +82,11 @@ CREATE TABLE IF NOT EXISTS job_discovery_h1b_sponsors (
   PRIMARY KEY (name_key),
   KEY idx_jd_h1b_last_year (last_fiscal_year)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS job_discovery_sources (
+  id VARCHAR(64) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  last_sync_at DATETIME(6) NULL,
+  updated_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

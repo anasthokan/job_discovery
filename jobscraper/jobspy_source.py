@@ -22,11 +22,22 @@ PLATFORM_TO_SITE = {name: site for site, name in SITE_TO_PLATFORM.items()}
 
 
 def sites_for_platform(platform: str) -> list[str]:
+    from jobscraper.sources import is_platform_active
+
     selected = platform or "All"
     if selected == "All":
-        return list(SITE_TO_PLATFORM)
-    site = PLATFORM_TO_SITE.get(selected)
-    return [site] if site else []
+        sites = list(SITE_TO_PLATFORM)
+    else:
+        site = PLATFORM_TO_SITE.get(selected)
+        sites = [site] if site else []
+    kept = []
+    for site in sites:
+        name = SITE_TO_PLATFORM[site]
+        if is_platform_active(name):
+            kept.append(site)
+            continue
+        log.info("Skipping inactive job source %s", name)
+    return kept
 
 
 def _blank(value):

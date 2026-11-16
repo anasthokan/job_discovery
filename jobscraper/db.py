@@ -423,6 +423,9 @@ def init_db() -> bool:
             cur.execute(CREATE_H1B_SQL)
             cur.execute(CREATE_CANDIDATES_SQL)
             _ensure_job_columns(cur)
+            from jobscraper.sources import ensure_sources
+
+            ensure_sources(cur)
         log.info("MySQL ready (%s/%s)", cfg["host"], cfg["database"])
         start_salary_backfill()
         return True

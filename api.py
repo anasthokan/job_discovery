@@ -62,6 +62,7 @@ from jobscraper.recommend import (
     recommend_jobs,
 )
 from jobscraper.resume_parser import ResumeParseError, parse_resume_bytes, parse_resume_text
+from jobscraper.sources import list_sources, set_source_status
 from jobscraper.db import (
     close_conn as close_mysql,
     enrich_jobs_everify,
@@ -1216,6 +1217,94 @@ def filters():
     }
 
 
+async def _passed_source_status(request: Request, source: str, status: str) -> tuple[str, str]:
+    """Read source and status from the query string, a JSON body, or form fields."""
+    payload: dict = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            raw = await request.json()
+        except Exception:
+            raw = None
+        if isinstance(raw, dict):
+            payload = raw
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form = await request.form()
+        payload = {key: form.get(key) for key in ("source", "status", "source_id")}
+    source_value = source or str(payload.get("source") or payload.get("source_id") or "")
+    status_value = status or str(payload.get("status") or "")
+    return source_value.strip(), status_value.strip()
+
+
+def _save_source_status(source: str, status: str) -> dict:
+    cleaned = status.strip().lower()
+    if not source or not cleaned:
+        raise HTTPException(status_code=422, detail="Pass source and status.")
+    if cleaned not in {"active", "inactive"}:
+        raise HTTPException(status_code=422, detail="Status must be active or inactive.")
+    try:
+        row = set_source_status(source, cleaned)
+    except Exception as exc:
+        log.exception("Could not update job source %s", source)
+        raise HTTPException(status_code=500, detail="Could not update the job source.") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job source '{source}'.")
+    if cleaned == "inactive":
+        message = "Job source is inactive. Jobs are no longer scraped from this source."
+    else:
+        message = "Job source is active. Jobs will be scraped from this source again."
+    return {"ok": True, "message": message, "source": row}
+
+
+@app.get("/api/sources")
+def job_sources(
+    source: str = Query("", description="Optional source id or platform name"),
+    status: str = Query("", description="Optional filter: active or inactive"),
+):
+    """Every scrape source and its status. inactive sources are not fetched."""
+    rows = list_sources()
+    if source.strip():
+        from jobscraper.sources import resolve_source
+
+        spec = resolve_source(source)
+        if spec is None:
+            raise HTTPException(status_code=404, detail=f"Unknown job source '{source}'.")
+        rows = [row for row in rows if row["id"] == spec["id"]]
+    wanted = status.strip().lower()
+    if wanted:
+        if wanted not in {"active", "inactive"}:
+            raise HTTPException(status_code=422, detail="Status must be active or inactive.")
+        rows = [row for row in rows if row["status"] == wanted]
+    return {"sources": rows, "count": len(rows)}
+
+
+@app.post("/api/sources")
+@app.put("/api/sources")
+@app.patch("/api/sources")
+async def update_job_source(
+    request: Request,
+    source: str = Query("", description="Source id or platform, for example greenhouse or Greenhouse"),
+    status: str = Query("", description="active or inactive"),
+):
+    """Pass source and status. Inactive sources are skipped on the next scrape."""
+    source_value, status_value = await _passed_source_status(request, source, status)
+    return _save_source_status(source_value, status_value)
+
+
+@app.post("/api/sources/{source_id}")
+@app.put("/api/sources/{source_id}")
+@app.patch("/api/sources/{source_id}")
+async def update_job_source_by_id(
+    source_id: str,
+    request: Request,
+    source: str = Query(""),
+    status: str = Query("", description="active or inactive"),
+):
+    """Same update when the source is in the path. status can be a query param or in the body."""
+    source_value, status_value = await _passed_source_status(request, source or source_id, status)
+    return _save_source_status(source_value, status_value)
+
+
 @app.get("/api/jobs")
 def get_jobs(
     keywords: str = Query("", description="Comma-separated title/company/skill keywords"),
@@ -1312,14 +1401,21 @@ def usajobs_series(
 
 
 @app.post("/api/scrape")
-def scrape_jobs(
+async def scrape_jobs(
+    request: Request,
     keywords: str = Query(""),
     state: str = Query("All"),
     platform: str = Query("All"),
     days: int = Query(30),
     city: str = Query(""),
+    source: str = Query("", description="Source id or platform whose status to set before this scrape"),
+    status: str = Query("", description="active or inactive. Applied to source before the scrape starts"),
 ):
     """Start a scrape and return immediately. IIS closes long requests with 502."""
+    source_value, status_value = await _passed_source_status(request, source, status)
+    updated = None
+    if source_value or status_value:
+        updated = _save_source_status(source_value, status_value)
     if not SCRAPE_LOCK.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A scrape is already running. Try again in a moment.")
     thread = threading.Thread(
@@ -1329,15 +1425,18 @@ def scrape_jobs(
         daemon=True,
     )
     thread.start()
-    return JSONResponse(
-        status_code=202,
-        content={
-            "ok": True,
-            "started": True,
-            "running": True,
-            "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check mysql.jobs.",
-        },
-    )
+    payload = {
+        "ok": True,
+        "started": True,
+        "running": True,
+        "message": "Scrape started. Poll GET /api/scrape/status until running is false, then check mysql.jobs.",
+    }
+    if updated:
+        payload["source"] = updated["source"]
+        payload["message"] = (
+            f"{updated['message']} Scrape started. Poll GET /api/scrape/status until running is false."
+        )
+    return JSONResponse(status_code=202, content=payload)
 
 
 def _scrape_background(keywords: str, state: str, platform: str, city: str) -> None:

@@ -283,7 +283,14 @@ class JobsSpider(scrapy.Spider):
         )
 
     def _wanted(self, selected, name):
-        return selected in ("All", name)
+        if selected not in ("All", name):
+            return False
+        from jobscraper.sources import is_platform_active
+
+        if is_platform_active(name):
+            return True
+        self.logger.info("Skipping inactive source %s", name)
+        return False
 
     def _json(self, response):
         try:

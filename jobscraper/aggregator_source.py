@@ -33,7 +33,14 @@ def _env(*names: str) -> str:
 
 
 def _wanted(selected: str, name: str) -> bool:
-    return selected in ("All", name)
+    if selected not in ("All", name):
+        return False
+    from jobscraper.sources import is_platform_active
+
+    if is_platform_active(name):
+        return True
+    log.info("Skipping inactive job source %s", name)
+    return False
 
 
 def _blank(value):
