@@ -224,6 +224,10 @@ US_SCOPED_PLATFORMS = frozenset({
     "Glassdoor",
     "ZipRecruiter",
     "Google Jobs",
+    "Adzuna",
+    "Jooble",
+    "Careerjet",
+    "USAJobs",
 })
 
 

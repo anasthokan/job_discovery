@@ -128,6 +128,100 @@ WORKABLE_ACCOUNTS = [
     "helpscout",
 ]
 
+# Public Workday career sites: host + tenant + site from the careers URL.
+WORKDAY_BOARDS = [
+    {
+        "host": "nvidia.wd5.myworkdayjobs.com",
+        "tenant": "nvidia",
+        "site": "NVIDIAExternalCareerSite",
+        "company": "NVIDIA",
+    },
+    {
+        "host": "salesforce.wd12.myworkdayjobs.com",
+        "tenant": "salesforce",
+        "site": "External_Career_Site",
+        "company": "Salesforce",
+    },
+    {
+        "host": "adobe.wd5.myworkdayjobs.com",
+        "tenant": "adobe",
+        "site": "external_experienced",
+        "company": "Adobe",
+    },
+    {
+        "host": "workday.wd5.myworkdayjobs.com",
+        "tenant": "workday",
+        "site": "Workday",
+        "company": "Workday",
+    },
+    {
+        "host": "autodesk.wd1.myworkdayjobs.com",
+        "tenant": "autodesk",
+        "site": "Ext",
+        "company": "Autodesk",
+    },
+    {
+        "host": "paypal.wd1.myworkdayjobs.com",
+        "tenant": "paypal",
+        "site": "jobs",
+        "company": "PayPal",
+    },
+    {
+        "host": "intel.wd1.myworkdayjobs.com",
+        "tenant": "intel",
+        "site": "External",
+        "company": "Intel",
+    },
+    {
+        "host": "redhat.wd5.myworkdayjobs.com",
+        "tenant": "redhat",
+        "site": "Jobs",
+        "company": "Red Hat",
+    },
+    {
+        "host": "ebay.wd5.myworkdayjobs.com",
+        "tenant": "ebay",
+        "site": "apply",
+        "company": "eBay",
+    },
+    {
+        "host": "boeing.wd1.myworkdayjobs.com",
+        "tenant": "boeing",
+        "site": "EXTERNAL_CAREERS",
+        "company": "Boeing",
+    },
+    {
+        "host": "hp.wd5.myworkdayjobs.com",
+        "tenant": "hp",
+        "site": "ExternalCareerSite",
+        "company": "HP",
+    },
+]
+
+BAMBOOHR_BOARDS = [
+    "flyio",
+    "d1g1t",
+    "zendesk",
+    "g2",
+]
+
+RECRUITEE_COMPANIES = [
+    "bunq",
+    "helloprint",
+    "effectory",
+]
+
+BREEZY_BOARDS = [
+    "breezy",
+    "beli",
+]
+
+PERSONIO_BOARDS = [
+    "deskbird",
+    "westwing",
+    "personio-gmbh",
+]
+
 WWR_FEEDS = [
     "https://weworkremotely.com/categories/remote-programming-jobs.rss",
     "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss",

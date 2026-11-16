@@ -127,12 +127,8 @@
       border: 1px solid var(--border); background: #fff; border-radius: 999px;
       padding: 8px 12px; font-size: 0.82rem; display: inline-flex; gap: 6px; align-items: center;
     }
+    .filter-pill[hidden] { display: none !important; }
     .filter-pill.active { border-color: #c7d2fe; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-    .filter-select {
-      border: 1px solid var(--border); background: #fff; border-radius: 999px;
-      padding: 8px 12px; font: inherit; font-size: 0.82rem; color: var(--text);
-    }
-    .filter-select:focus { outline: 2px solid #c7d2fe; }
 
     .jobs-split-container {
       display: grid;
@@ -211,6 +207,7 @@
     .status-banner {
       font-size: 0.82rem; color: var(--muted); margin: 0 0 12px;
     }
+    .status-banner[hidden] { display: none !important; }
     .status-banner.error { color: #b91c1c; }
 
     @media (max-width: 1100px) {
@@ -316,10 +313,6 @@
                 <button type="button" class="filter-pill" id="filter-source-btn">
                   <span class="filter-btn-label" id="filter-source-label">USAJobs</span>
                 </button>
-                <label class="filter-pill" id="greenhouse-board-wrap" hidden>
-                  <span>Board</span>
-                  <select id="greenhouse-board" class="filter-select" aria-label="Greenhouse board"></select>
-                </label>
               </div>
             </div>
 
@@ -422,13 +415,10 @@
       },
     };
 
-    const boardSelect = document.getElementById("greenhouse-board");
-    const boardWrap = document.getElementById("greenhouse-board-wrap");
     let currentList = listFromHash();
     let lists = { agencies: [], series: [], greenhouse: [] };
-    let greenhouseBoards = [];
-    let greenhouseBoard = "stripe";
     let greenhouseReq = 0;
+    let greenhouseLoading = false;
     let detailReq = 0;
     let jobs = [];
     let filtered = [];
@@ -491,7 +481,8 @@
     }
 
     function setStatus(message, isError = false) {
-      statusEl.textContent = message;
+      statusEl.hidden = !message;
+      statusEl.textContent = message || "";
       statusEl.classList.toggle("error", isError);
     }
 
@@ -525,7 +516,6 @@
       document.getElementById("filter-source-label").textContent = meta.source;
       document.querySelector("#filter-location-btn .filter-btn-label").textContent = meta.locationLabel;
       searchInput.placeholder = meta.placeholder;
-      boardWrap.hidden = currentList !== "greenhouse";
       document.getElementById("filter-source-btn").hidden = currentList === "greenhouse";
       document.querySelectorAll(".tracker-subtab").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.list === currentList);
@@ -614,7 +604,7 @@
           <h1 class="detail-job-title">${escapeHtml(job.title)}</h1>
           <div class="job-tags-grid">
             <div class="tag-grid-item"><span>${escapeHtml(job.location || "Location not listed")}</span></div>
-            <div class="tag-grid-item"><span>Greenhouse · ${escapeHtml(job.board || greenhouseBoard)}</span></div>
+            <div class="tag-grid-item"><span>Greenhouse · ${escapeHtml(job.board || "")}</span></div>
             <div class="tag-grid-item"><span>Job ${escapeHtml(job.greenhouse_id || "—")}</span></div>
             <div class="tag-grid-item"><span>${escapeHtml(job.requisition_id || "No requisition id")}</span></div>
           </div>
@@ -652,7 +642,7 @@
         const needsDetail = job.description == null;
         paintGreenhouse(job, needsDetail);
         if (!needsDetail) return;
-        fetchGreenhouseJob(job.board || greenhouseBoard, job.greenhouse_id)
+        fetchGreenhouseJob(job.board, job.greenhouse_id)
           .then((full) => {
             if (token !== detailReq) return;
             Object.assign(job, full);
@@ -838,43 +828,64 @@
       return mapPayload(data, listName);
     }
 
-    function fillBoardSelect() {
-      const tokens = greenhouseBoards.map((row) => row.token);
-      if (tokens.length && !tokens.includes(greenhouseBoard)) greenhouseBoard = tokens[0];
-      boardSelect.innerHTML = greenhouseBoards.map((row) => (
-        `<option value="${escapeHtml(row.token)}">${escapeHtml(row.name || row.token)}</option>`
-      )).join("");
-      if (greenhouseBoard) boardSelect.value = greenhouseBoard;
+    async function fetchBoardJobs(board) {
+      const data = await fetchGreenhouseJson(`${GREENHOUSE_API}/${encodeURIComponent(board)}/jobs`);
+      return (data.jobs || []).map((row) => mapGreenhouseJob(row, board));
     }
 
-    async function loadGreenhouse(board) {
-      const nextBoard = board || greenhouseBoard || "stripe";
-      if (lists.greenhouse.length && lists.greenhouse[0]?.board === nextBoard) {
-        greenhouseBoard = nextBoard;
+    async function loadGreenhouse() {
+      if (lists.greenhouse.length) {
+        setStatus("");
         setActiveList("greenhouse", { resetSelection: currentList !== "greenhouse" });
         return;
       }
+      if (greenhouseLoading) {
+        currentList = "greenhouse";
+        document.querySelectorAll(".tracker-subtab").forEach((btn) => {
+          btn.classList.toggle("active", btn.dataset.list === "greenhouse");
+        });
+        document.getElementById("filter-source-btn").hidden = true;
+        if (location.hash !== "#greenhouse") {
+          history.replaceState(null, "", `${location.pathname}${location.search}#greenhouse`);
+        }
+        return;
+      }
       const req = ++greenhouseReq;
-      greenhouseBoard = nextBoard;
+      greenhouseLoading = true;
+      const meta = LIST_META.greenhouse;
       currentList = "greenhouse";
+      document.getElementById("list-kind-label").textContent = meta.label;
+      document.getElementById("filter-kind-label").textContent = meta.kind;
+      document.querySelector("#filter-location-btn .filter-btn-label").textContent = meta.locationLabel;
+      searchInput.placeholder = meta.placeholder;
       document.querySelectorAll(".tracker-subtab").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.list === "greenhouse");
       });
-      boardWrap.hidden = false;
       document.getElementById("filter-source-btn").hidden = true;
-      setStatus(`Loading Greenhouse jobs for ${greenhouseBoard}…`);
+      setStatus("");
       listEl.innerHTML = `<div class="loading-state">Loading Greenhouse jobs…</div>`;
       detailEl.innerHTML = `<div class="empty-state">Loading Greenhouse jobs…</div>`;
+      const collected = [];
+      const queue = GREENHOUSE_BOARDS.slice();
+      const workers = Array.from({ length: 8 }, async () => {
+        while (queue.length && req === greenhouseReq) {
+          const board = queue.shift();
+          try {
+            collected.push(...await fetchBoardJobs(board));
+          } catch (err) {
+            /* skip boards Greenhouse no longer serves */
+          }
+        }
+      });
       try {
-        const data = await fetchGreenhouseJson(`${GREENHOUSE_API}/${encodeURIComponent(greenhouseBoard)}/jobs`);
-        if (req !== greenhouseReq || currentList !== "greenhouse") return;
-        lists.greenhouse = (data.jobs || []).map((row) => mapGreenhouseJob(row, greenhouseBoard));
-        setStatus(`Loaded ${lists.greenhouse.length} Greenhouse jobs from ${greenhouseBoard}.`);
+        await Promise.all(workers);
+        if (req !== greenhouseReq) return;
+        lists.greenhouse = collected;
+        if (currentList !== "greenhouse") return;
+        setStatus("");
         setActiveList("greenhouse", { resetSelection: true });
-      } catch (err) {
-        if (req !== greenhouseReq || currentList !== "greenhouse") return;
-        setStatus(`Could not load Greenhouse jobs for ${greenhouseBoard}.`, true);
-        listEl.innerHTML = `<div class="empty-state">Greenhouse did not return jobs for this board.</div>`;
+      } finally {
+        if (req === greenhouseReq) greenhouseLoading = false;
       }
     }
 
@@ -899,29 +910,22 @@
     document.querySelectorAll(".tracker-subtab").forEach((btn) => {
       btn.addEventListener("click", () => {
         if (btn.dataset.list === "greenhouse") {
-          loadGreenhouse(boardSelect.value || greenhouseBoard);
+          loadGreenhouse();
           return;
         }
         setActiveList(btn.dataset.list);
       });
     });
 
-    boardSelect.addEventListener("change", () => {
-      lists.greenhouse = [];
-      loadGreenhouse(boardSelect.value);
-    });
-
     window.addEventListener("hashchange", () => {
       const next = listFromHash();
       if (next === currentList) return;
-      if (next === "greenhouse") loadGreenhouse(boardSelect.value || greenhouseBoard);
+      if (next === "greenhouse") loadGreenhouse();
       else setActiveList(next);
     });
 
-    greenhouseBoards = GREENHOUSE_BOARDS.map((token) => ({ token, name: boardLabel(token) }));
-    fillBoardSelect();
     loadLists();
-    if (currentList === "greenhouse") loadGreenhouse(greenhouseBoard);
+    if (currentList === "greenhouse") loadGreenhouse();
   </script>
 </body>
 

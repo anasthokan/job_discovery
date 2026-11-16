@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BOT_NAME = "jobscraper"
 
 SPIDER_MODULES = ["jobscraper.spiders"]
@@ -19,6 +21,7 @@ LOG_LEVEL = "INFO"
 TELNETCONSOLE_ENABLED = False
 
 _ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_ROOT / ".env")
 _DATA = _ROOT / "data"
 _DATA.mkdir(exist_ok=True)
 

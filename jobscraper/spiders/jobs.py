@@ -28,13 +28,20 @@ from jobscraper.agent_reach import (
     posting_paragraph,
     yc_jobs_url,
 )
+from jobscraper.aggregator_source import KEYED_PLATFORMS
+from jobscraper.aggregator_source import scrape as scrape_aggregators
 from jobscraper.boards import (
     ASHBY_BOARDS,
+    BAMBOOHR_BOARDS,
+    BREEZY_BOARDS,
     GREENHOUSE_BOARDS,
     LEVER_COMPANIES,
+    PERSONIO_BOARDS,
+    RECRUITEE_COMPANIES,
     REMOTECO_FEED,
     SMARTRECRUITERS_COMPANIES,
     WORKABLE_ACCOUNTS,
+    WORKDAY_BOARDS,
     WWR_FEEDS,
 )
 from jobscraper.items import JobItem
@@ -123,7 +130,18 @@ def days_ago(value) -> int:
         except (OSError, OverflowError, ValueError):
             return 0
     else:
-        cleaned = str(value).strip().replace("Z", "+00:00")
+        cleaned = str(value).strip()
+        lower = cleaned.lower()
+        if "today" in lower:
+            return 0
+        if "yesterday" in lower:
+            return 1
+        relative = re.search(r"(\d+)\+?\s*days?\s+ago", lower)
+        if relative:
+            return int(relative.group(1))
+        cleaned = cleaned.replace(" UTC", "+00:00").replace("Z", "+00:00")
+        if re.match(r"\d{4}-\d{2}-\d{2} \d{2}:", cleaned):
+            cleaned = cleaned.replace(" ", "T", 1)
         try:
             posted = datetime.fromisoformat(cleaned)
         except ValueError:
@@ -235,6 +253,33 @@ class JobsSpider(scrapy.Spider):
             errback=self.errback,
             headers=JINA_HEADERS,
             meta={"download_timeout": 40},
+        )
+
+    def _workday_request(self, board, offset, first_id=""):
+        body = json.dumps(
+            {
+                "appliedFacets": {},
+                "limit": 20,
+                "offset": offset,
+                "searchText": "",
+            }
+        )
+        host = board["host"]
+        tenant = board["tenant"]
+        site = board["site"]
+        return scrapy.Request(
+            f"https://{host}/wday/cxs/{tenant}/{site}/jobs",
+            method="POST",
+            body=body,
+            callback=self.parse_workday,
+            errback=self.errback,
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Referer": f"https://{host}/{site}",
+            },
+            cb_kwargs={"board": board, "offset": offset, "first_id": first_id},
+            dont_filter=True,
         )
 
     def _wanted(self, selected, name):
@@ -375,6 +420,51 @@ class JobsSpider(scrapy.Spider):
                     cb_kwargs={"company": account},
                 )
 
+        if self._wanted(selected, "Workday"):
+            for board in WORKDAY_BOARDS:
+                yield self._workday_request(board, 0)
+
+        if self._wanted(selected, "BambooHR"):
+            for board in BAMBOOHR_BOARDS:
+                yield scrapy.Request(
+                    f"https://{board}.bamboohr.com/careers/list",
+                    callback=self.parse_bamboohr,
+                    errback=self.errback,
+                    headers=headers,
+                    cb_kwargs={"company": board},
+                )
+
+        if self._wanted(selected, "Recruitee"):
+            for company in RECRUITEE_COMPANIES:
+                yield scrapy.Request(
+                    f"https://{company}.recruitee.com/api/offers/",
+                    callback=self.parse_recruitee,
+                    errback=self.errback,
+                    headers=headers,
+                    cb_kwargs={"company": company},
+                )
+
+        if self._wanted(selected, "Breezy HR"):
+            for board in BREEZY_BOARDS:
+                yield scrapy.Request(
+                    f"https://{board}.breezy.hr/json",
+                    callback=self.parse_breezy,
+                    errback=self.errback,
+                    headers=headers,
+                    cb_kwargs={"company": board},
+                )
+
+        if self._wanted(selected, "Personio"):
+            xml_headers = {"Accept": "application/xml, text/xml, */*"}
+            for board in PERSONIO_BOARDS:
+                yield scrapy.Request(
+                    f"https://{board}.jobs.personio.de/xml?language=en",
+                    callback=self.parse_personio,
+                    errback=self.errback,
+                    headers=xml_headers,
+                    cb_kwargs={"company": board},
+                )
+
         queries = self._search_queries()
         where = self._search_location()
         remote = self.location == "Remote"
@@ -433,6 +523,37 @@ class JobsSpider(scrapy.Spider):
                 rows = []
             self.logger.info("JobSpy returned %s jobs from %s", len(rows), ", ".join(jobspy_sites))
             for row in rows:
+                location = row.get("location") or ""
+                for item in self._emit(
+                    id=row["id"],
+                    title=row["title"],
+                    company=row["company"],
+                    skills=row.get("skills") or [],
+                    state=parse_state(location),
+                    location=location,
+                    platform=row["platform"],
+                    daysAgo=days_ago(row.get("posted_at")),
+                    url=row["url"],
+                    posted_at=row.get("posted_at") or "",
+                    job_type=row.get("job_type"),
+                    search_text=row.get("search_text") or "",
+                    raw=row.get("raw"),
+                ):
+                    yield item
+
+        if selected in ("All", *KEYED_PLATFORMS):
+            try:
+                agg_rows = await asyncio.to_thread(
+                    scrape_aggregators,
+                    selected,
+                    queries,
+                    where,
+                    is_remote=remote,
+                )
+            except Exception:
+                self.logger.exception("Aggregator scrape failed")
+                agg_rows = []
+            for row in agg_rows:
                 location = row.get("location") or ""
                 for item in self._emit(
                     id=row["id"],
@@ -842,6 +963,199 @@ class JobsSpider(scrapy.Spider):
                 posted_at=str(posted),
                 search_text=row.get("description") or "",
                 raw=row,
+            )
+
+    def parse_workday(self, response, board=None, offset=0, first_id=""):
+        payload = self._json(response)
+        rows = payload.get("jobPostings") or []
+        if not rows:
+            return
+        lead = rows[0].get("externalPath") or ""
+        if first_id and lead == first_id:
+            return
+        board = board or {}
+        host = board.get("host") or ""
+        site = board.get("site") or ""
+        company = board.get("company") or host.split(".")[0].title()
+        for row in rows:
+            path = row.get("externalPath") or ""
+            ident = ""
+            bullets = row.get("bulletFields") or []
+            if bullets:
+                ident = str(bullets[0])
+            ident = ident or path
+            url = f"https://{host}/{site}{path}" if host and site and path else ""
+            location = row.get("locationsText") or "Remote"
+            remote_type = str(row.get("remoteType") or "")
+            if remote_type and "remote" in remote_type.lower() and "remote" not in location.lower():
+                location = f"{location} · Remote"
+            posted = row.get("postedOn") or ""
+            yield from self._emit(
+                id=f"workday-{company}-{ident}",
+                title=row.get("title"),
+                company=company,
+                skills=as_list(remote_type),
+                state=parse_state(location),
+                location=location,
+                platform="Workday",
+                daysAgo=days_ago(posted),
+                url=url,
+                posted_at=str(posted),
+                search_text=f"{row.get('title') or ''} {location}",
+                raw=row,
+            )
+        if len(rows) >= 20 and offset < 80:
+            yield self._workday_request(board, offset + 20, first_id or lead)
+
+    def parse_bamboohr(self, response, company=""):
+        payload = self._json(response)
+        if isinstance(payload, list):
+            rows = payload
+        else:
+            rows = payload.get("result") or payload.get("jobs") or []
+        display = company.replace("-", " ").title()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            loc = row.get("location") or {}
+            ats = row.get("atsLocation") or {}
+            if not isinstance(loc, dict):
+                loc = {}
+            if not isinstance(ats, dict):
+                ats = {}
+            parts = [
+                loc.get("city") or ats.get("city") or "",
+                loc.get("state") or ats.get("state") or ats.get("province") or "",
+                ats.get("country") or loc.get("country") or "",
+            ]
+            location = ", ".join(part for part in parts if part)
+            if row.get("isRemote") or str(row.get("locationType") or "") in {"1", "Remote", "remote"}:
+                location = f"{location} · Remote" if location else "Remote"
+            location = location or "Remote"
+            ident = str(row.get("id") or row.get("jobOpeningName") or "")
+            url = f"https://{company}.bamboohr.com/careers/{ident}" if ident else ""
+            yield from self._emit(
+                id=f"bamboohr-{company}-{ident}",
+                title=row.get("jobOpeningName") or row.get("title"),
+                company=display,
+                skills=as_list(row.get("departmentLabel")),
+                state=parse_state(location),
+                location=location,
+                platform="BambooHR",
+                daysAgo=days_ago(row.get("datePosted") or ""),
+                url=url,
+                posted_at=str(row.get("datePosted") or ""),
+                job_type=row.get("employmentStatusLabel") or row.get("employmentType") or "",
+                search_text=row.get("jobOpeningName") or "",
+                raw=row,
+            )
+
+    def parse_recruitee(self, response, company=""):
+        payload = self._json(response)
+        display = company.replace("-", " ").title()
+        for row in payload.get("offers") or []:
+            city = row.get("city") or ""
+            country = row.get("country") or row.get("country_code") or ""
+            raw_loc = row.get("location")
+            if isinstance(raw_loc, dict):
+                location = raw_loc.get("city") or raw_loc.get("name") or city or "Remote"
+            elif raw_loc:
+                location = str(raw_loc)
+            else:
+                location = ", ".join(part for part in [city, country] if part) or "Remote"
+            if row.get("remote") and "remote" not in location.lower():
+                location = f"{location} · Remote"
+            posted = row.get("published_at") or row.get("created_at") or ""
+            ident = str(row.get("id") or "")
+            url = row.get("careers_url") or row.get("careers_apply_url") or ""
+            description = f"{row.get('description') or ''} {row.get('requirements') or ''}"
+            yield from self._emit(
+                id=f"recruitee-{company}-{ident}",
+                title=row.get("title"),
+                company=row.get("company_name") or display,
+                skills=as_list(row.get("department") or row.get("department_code")),
+                state=parse_state(location),
+                location=location,
+                platform="Recruitee",
+                daysAgo=days_ago(posted),
+                url=url,
+                posted_at=str(posted),
+                job_type=row.get("employment_type_code") or "",
+                search_text=description,
+                raw=row,
+            )
+
+    def parse_breezy(self, response, company=""):
+        payload = self._json(response)
+        rows = payload if isinstance(payload, list) else payload.get("positions") or []
+        display = company.replace("-", " ").title()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            loc = row.get("location") or {}
+            if not isinstance(loc, dict):
+                loc = {}
+            country = loc.get("country")
+            if isinstance(country, dict):
+                country = country.get("name") or country.get("code") or ""
+            parts = [loc.get("city") or "", loc.get("state") or "", country or ""]
+            location = ", ".join(part for part in parts if part) or "Remote"
+            if loc.get("is_remote") and "remote" not in location.lower():
+                location = f"{location} · Remote"
+            posted = row.get("published_date") or row.get("created_at") or ""
+            ident = str(row.get("id") or row.get("friendly_id") or "")
+            url = row.get("url") or (f"https://{company}.breezy.hr/p/{ident}" if ident else "")
+            company_name = ((row.get("company") or {}).get("name") if isinstance(row.get("company"), dict) else "") or display
+            yield from self._emit(
+                id=f"breezy-{company}-{ident}",
+                title=row.get("name") or row.get("title"),
+                company=company_name,
+                skills=as_list(row.get("department")),
+                state=parse_state(location),
+                location=location,
+                platform="Breezy HR",
+                daysAgo=days_ago(posted),
+                url=url,
+                posted_at=str(posted),
+                job_type=(row.get("type") or {}).get("name") if isinstance(row.get("type"), dict) else row.get("type") or "",
+                search_text=row.get("description") or row.get("name") or "",
+                raw=row,
+            )
+
+    def parse_personio(self, response, company=""):
+        display = company.replace("-", " ").title()
+        for pos in response.xpath("//position"):
+            ident = (pos.xpath("id/text()").get() or "").strip()
+            title = (pos.xpath("name/text()").get() or "").strip()
+            office = (pos.xpath("office/text()").get() or "").strip()
+            extras = [part.strip() for part in pos.xpath("additionalOffices/office/text()").getall() if part.strip()]
+            location = ", ".join(part for part in [office, *extras] if part) or "Remote"
+            posted = (pos.xpath("createdAt/text()").get() or "").strip()
+            dept = (pos.xpath("department/text()").get() or "").strip()
+            job_type = (pos.xpath("employmentType/text()").get() or "").strip()
+            desc_parts = pos.xpath("jobDescriptions/jobDescription/value//text()").getall()
+            description = strip_html(" ".join(desc_parts))
+            url = f"https://{company}.jobs.personio.de/job/{ident}" if ident else ""
+            company_name = (pos.xpath("subcompany/text()").get() or "").strip() or display
+            yield from self._emit(
+                id=f"personio-{company}-{ident}",
+                title=title,
+                company=company_name,
+                skills=as_list(dept),
+                state=parse_state(location),
+                location=location,
+                platform="Personio",
+                daysAgo=days_ago(posted),
+                url=url,
+                posted_at=posted,
+                job_type=job_type,
+                search_text=description,
+                raw={
+                    "id": ident,
+                    "office": office,
+                    "department": dept,
+                    "employmentType": job_type,
+                },
             )
 
     def parse_linkedin(self, response):
