@@ -80,6 +80,7 @@ from jobscraper.db import (
     load_jobs as load_jobs_mysql,
     mysql_configured,
     save_candidate as save_candidate_mysql,
+    h1b_count,
     replace_everify_employers,
     start_h1b_sponsor_load,
     start_scrape_run,
@@ -1558,6 +1559,53 @@ def everify_refresh():
     loaded = replace_everify_employers(rows)
     stats = enrich_jobs_everify()
     return {"ok": True, "loaded": loaded, **stats}
+
+
+@app.get("/api/h1b/status")
+def h1b_status():
+    return {
+        "ok": True,
+        "source": "https://www.uscis.gov/archive/h-1b-employer-data-hub-files",
+        "fiscal_years": "2009-2023",
+        "employers": h1b_count() if mysql_configured() else 0,
+        "note": (
+            "Employers with at least one USCIS H-1B approval in FY2009–FY2023. "
+            "The list loads on startup when the table is empty. "
+            "A name in the table is h1b_sponsor yes. A name that is not is no, "
+            "which is not proof the employer never sponsored."
+        ),
+    }
+
+
+@app.get("/api/h1b/filters")
+def h1b_filters():
+    """Dropdown values for the H-1B Checker form."""
+    from jobscraper.h1b_sponsors import filter_options
+
+    return {"ok": True, **filter_options()}
+
+
+@app.get("/api/h1b/search")
+def h1b_search(
+    company: str = Query(..., min_length=2, description="Employer legal name or company keyword"),
+    fiscal_year: str = Query("All", description="All, or a fiscal year from 2009 through 2023"),
+    limit: int = Query(25, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Search button on the H-1B Employer Checker."""
+    from jobscraper.h1b_sponsors import search
+
+    try:
+        return search(company, fiscal_year, limit, offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/h1b/lookup")
+def h1b_lookup(company: str = Query(..., min_length=2)):
+    from jobscraper.h1b_sponsors import lookup
+
+    return {"ok": True, "company": company, **lookup(company)}
 
 
 @app.get("/api/recommend")

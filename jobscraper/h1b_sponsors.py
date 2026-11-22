@@ -316,3 +316,153 @@ def match_sponsor(company: str, index: dict[str, dict]) -> dict | None:
         if hit:
             return hit
     return None
+
+
+def filter_options() -> dict:
+    years = [{"value": "All", "label": "FY2009–FY2023"}]
+    for year in reversed(FISCAL_YEARS):
+        years.append({"value": str(year), "label": f"FY{year}"})
+    return {"fiscal_years": years}
+
+
+def resolve_fiscal_year(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return "All"
+    key = raw.casefold()
+    if key.startswith("fy"):
+        key = key[2:]
+    if key in {"all", "all years"}:
+        return "All"
+    if key.isdigit():
+        year = int(key)
+        if year in FISCAL_YEARS:
+            return str(year)
+    allowed = "All, " + ", ".join(str(year) for year in FISCAL_YEARS)
+    raise ValueError(f"Unknown fiscal year. Use one of: {allowed}.")
+
+
+YEAR_NOTE = (
+    "A fiscal year keeps employers whose stored approval span includes that year. "
+    "This table does not store a separate approval count for each year."
+)
+
+
+def year_matches(row: dict, fiscal_year: str) -> bool:
+    if fiscal_year == "All":
+        return True
+    year = int(fiscal_year)
+    first = int(row.get("first_fiscal_year") or 0)
+    last = int(row.get("last_fiscal_year") or 0)
+    if first <= 0 or last <= 0:
+        return False
+    return first <= year <= last
+
+
+def name_matches(keyword: str, employer: str) -> bool:
+    key = normalize_name(keyword)
+    other = normalize_name(employer or "")
+    if len(key) >= 2 and other and (key == other or key in other or (len(other) >= 4 and other in key)):
+        return True
+    brand = brand_key(keyword)
+    other_brand = brand_key(employer or "")
+    if len(brand) >= 4 and other_brand and (brand == other_brand or brand in other_brand):
+        return True
+    return False
+
+
+def sponsor_result(row: dict) -> dict:
+    return {
+        "employer": (row.get("employer") or "").strip(),
+        "approvals": int(row.get("approvals") or 0),
+        "denials": int(row.get("denials") or 0),
+        "first_fiscal_year": int(row.get("first_fiscal_year") or 0),
+        "last_fiscal_year": int(row.get("last_fiscal_year") or 0),
+        "h1b_sponsor": "yes",
+    }
+
+
+def _search_message(ready: bool, total: int, fiscal_year: str) -> str:
+    if not ready:
+        return "USCIS H-1B employer list is not loaded yet."
+    where = f" for FY{fiscal_year}" if fiscal_year != "All" else ""
+    if total == 0:
+        return (
+            f"No USCIS H-1B approval matched this company name{where}. "
+            "That is not a confirmed No — legal names often differ, and this file covers FY2009–FY2023."
+        )
+    if fiscal_year == "All":
+        return "At least one matched employer has a USCIS H-1B approval in fiscal years 2009–2023."
+    return (
+        f"At least one matched employer has an approval span that includes FY{fiscal_year}. "
+        "The span is first through last fiscal year, not a count for that year alone."
+    )
+
+
+def lookup(company: str) -> dict:
+    from jobscraper.db import h1b_count, h1b_index
+
+    empty = {
+        "h1b_sponsor": "unknown",
+        "employer": None,
+        "approvals": None,
+        "denials": None,
+        "first_fiscal_year": None,
+        "last_fiscal_year": None,
+    }
+    index = h1b_index()
+    if h1b_count() <= 0 and not index:
+        return empty
+    row = match_sponsor(company, index)
+    if not row:
+        return {**empty, "h1b_sponsor": "no"}
+    return sponsor_result(row)
+
+
+def search(company: str, fiscal_year: str = "All", limit: int = 25, offset: int = 0) -> dict:
+    from jobscraper.db import h1b_count, h1b_index, h1b_search_rows
+
+    year = resolve_fiscal_year(fiscal_year)
+    loaded = h1b_search_rows(company)
+    matched = []
+    seen = set()
+    for row in loaded:
+        employer = row.get("employer") or ""
+        if not name_matches(company, employer):
+            continue
+        if not year_matches(row, year):
+            continue
+        result = sponsor_result(row)
+        key = normalize_name(result["employer"])
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        matched.append(result)
+    index = h1b_index()
+    branded = match_sponsor(company, index) if index else None
+    if branded and year_matches(branded, year):
+        result = sponsor_result(branded)
+        key = normalize_name(result["employer"])
+        if key and key not in seen:
+            matched.append(result)
+    matched.sort(key=lambda item: (-item["approvals"], item["employer"].lower()))
+    page = matched[offset : offset + limit]
+    employers = h1b_count()
+    ready = employers > 0 or bool(index)
+    summary = "unknown" if not ready else ("yes" if matched else "no")
+    return {
+        "ok": True,
+        "company": company.strip(),
+        "fiscal_year": year,
+        "fiscal_year_label": "FY2009–FY2023" if year == "All" else f"FY{year}",
+        "fiscal_year_applied": year != "All",
+        "fiscal_year_note": YEAR_NOTE,
+        "database_ready": ready,
+        "count": len(page),
+        "total": len(matched),
+        "limit": limit,
+        "offset": offset,
+        "h1b_sponsor": summary,
+        "message": _search_message(ready, len(matched), year),
+        "results": page,
+    }

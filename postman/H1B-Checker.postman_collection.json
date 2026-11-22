@@ -1,0 +1,256 @@
+{
+  "info": {
+    "name": "H-1B Checker",
+    "description": "USCIS H-1B Employer Checker.\n\nGive this collection to the frontend developer for `/tools/h1b`.\n\nProduction base URL is the collection variable `baseUrl` (http://74.208.184.175:517). For local, change it to http://127.0.0.1:9001.\n\nNo auth. No request body. GET only.\n\nSearch button: GET /api/h1b/search\nDropdown: GET /api/h1b/filters\n\nSend dropdown `value`, not the visible label.\n\nfiscal_year: All | 2009 | 2010 | ... | 2023\n\nThere is no state or industry dropdown. The stored USCIS file has employer, approvals, denials, and the first and last fiscal year.\n\nAll means FY2009–FY2023. A specific year keeps employers whose approval span includes that year. It is not a separate approval count for that year. Read `fiscal_year_note`.\n\nh1b_sponsor: yes | no | unknown\nunknown means the employer table is not loaded. no means the name was checked and did not match. no is not proof the employer never sponsored.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://74.208.184.175:517"
+    }
+  ],
+  "item": [
+    {
+      "name": "Dropdown",
+      "item": [
+        {
+          "name": "GET filters",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/filters",
+            "description": "Fills the Fiscal Year dropdown.\n\nUse data.fiscal_years[].value in the search request.\nShow data.fiscal_years[].label in the dropdown.\n\nFirst option is All (FY2009–FY2023). Then FY2023 down to FY2009."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const data = pm.response.json();",
+                  "pm.test('fiscal years', function () {",
+                  "    pm.expect(data.ok).to.eql(true);",
+                  "    pm.expect(data.fiscal_years[0]).to.eql({ value: 'All', label: 'FY2009–FY2023' });",
+                  "    pm.expect(data.fiscal_years[1]).to.eql({ value: '2023', label: 'FY2023' });",
+                  "    pm.expect(data.fiscal_years[data.fiscal_years.length - 1]).to.eql({ value: '2009', label: 'FY2009' });",
+                  "    pm.expect(data.fiscal_years).to.have.lengthOf(16);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Search H-1B Database",
+      "item": [
+        {
+          "name": "Search Google all years",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=Google&fiscal_year=All&limit=25&offset=0",
+            "description": "This is the Search H-1B Database button.\n\nUI mapping:\n- Employer Legal Name or Company Keyword -> company\n- Fiscal Year FY2009–FY2023 -> All\n\nShow data.message under the button.\nEach result: employer, approvals, denials, first_fiscal_year, last_fiscal_year, h1b_sponsor.\n\nA result h1b_sponsor is yes. The employer is in the USCIS file because it has at least one approval."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const data = pm.response.json();",
+                  "pm.test('search shape', function () {",
+                  "    pm.expect(data.ok).to.eql(true);",
+                  "    pm.expect(data.company).to.eql('Google');",
+                  "    pm.expect(data.fiscal_year).to.eql('All');",
+                  "    pm.expect(data.fiscal_year_label).to.eql('FY2009–FY2023');",
+                  "    pm.expect(data.fiscal_year_applied).to.eql(false);",
+                  "    pm.expect(data).to.have.property('fiscal_year_note');",
+                  "    pm.expect(data).to.have.property('database_ready');",
+                  "    pm.expect(data).to.have.property('message');",
+                  "    pm.expect(data).to.have.property('h1b_sponsor');",
+                  "    pm.expect(data).to.have.property('results');",
+                  "    pm.expect(data.limit).to.eql(25);",
+                  "    pm.expect(data.offset).to.eql(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search Microsoft all years",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=Microsoft&fiscal_year=All&limit=25&offset=0",
+            "description": "Same Search button with Fiscal Year on the first option."
+          },
+          "response": []
+        },
+        {
+          "name": "Search Amazon FY2023",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=Amazon&fiscal_year=2023&limit=25&offset=0",
+            "description": "Fiscal Year: FY2023.\n\nfiscal_year_applied is true. A row is kept when first_fiscal_year <= 2023 <= last_fiscal_year.\nShow fiscal_year_note. This is the span, not approvals for 2023 alone."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const data = pm.response.json();",
+                  "pm.test('FY2023 is applied', function () {",
+                  "    pm.expect(data.ok).to.eql(true);",
+                  "    pm.expect(data.company).to.eql('Amazon');",
+                  "    pm.expect(data.fiscal_year).to.eql('2023');",
+                  "    pm.expect(data.fiscal_year_label).to.eql('FY2023');",
+                  "    pm.expect(data.fiscal_year_applied).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Search Google FY2009",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=Google&fiscal_year=FY2009&limit=25&offset=0",
+            "description": "FY2009 is accepted with or without the FY prefix. The response fiscal_year is 2009."
+          },
+          "response": []
+        },
+        {
+          "name": "Search with no match",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=NotARealCompanyXYZ&fiscal_year=All&limit=25&offset=0",
+            "description": "When database_ready is true and total is 0, h1b_sponsor is no.\nShow data.message. Do not treat no as proof the employer never sponsored."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Errors",
+      "item": [
+        {
+          "name": "Unknown fiscal year returns 400",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=Google&fiscal_year=1990",
+            "description": "Show response.detail. 1990 is outside FY2009–FY2023."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 400', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Company too short returns 422",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/search?company=G&fiscal_year=All",
+            "description": "Employer keyword must be at least 2 characters. Show response.detail."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Single company check",
+      "item": [
+        {
+          "name": "GET lookup Microsoft",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/lookup?company=Microsoft",
+            "description": "Optional. The Checker screen should call /api/h1b/search, not this.\n\nh1b_sponsor is yes, no, or unknown. unknown means the employer table is not loaded. no means the name was checked and did not match."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Database status",
+      "item": [
+        {
+          "name": "GET status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/h1b/status",
+            "description": "employers is how many sponsor rows are loaded. 0 means search will return database_ready false and h1b_sponsor unknown."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const data = pm.response.json();",
+                  "pm.test('status shape', function () {",
+                  "    pm.expect(data.ok).to.eql(true);",
+                  "    pm.expect(data.fiscal_years).to.eql('2009-2023');",
+                  "    pm.expect(data).to.have.property('employers');",
+                  "    pm.expect(data).to.have.property('source');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
