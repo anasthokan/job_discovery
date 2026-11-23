@@ -84,6 +84,7 @@ from jobscraper.db import (
     replace_everify_employers,
     start_h1b_sponsor_load,
     start_scrape_run,
+    start_startup_maintenance,
     upsert_jobs,
 )
 
@@ -194,6 +195,7 @@ def _boot() -> None:
         init_mysql()
         import_json_if_empty(DATA_FILE)
         start_h1b_sponsor_load()
+        start_startup_maintenance()
     except Exception:
         log.exception("API boot failed")
     if _BOOT_STOP.is_set():

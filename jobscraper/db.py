@@ -14,6 +14,7 @@ import re
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -603,10 +604,53 @@ def clear_copied_api_raw_descriptions() -> int:
 _STARTUP_MAINTENANCE_STARTED = False
 
 
+def _is_placeholder_url(url: str) -> bool:
+    """jobs.example.com and other example.com links are demo rows, not postings."""
+    host = urlparse(str(url or "").strip()).netloc.lower().split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "example.com" or host.endswith(".example.com")
+
+
+def _is_placeholder_source(source_id: str) -> bool:
+    text = str(source_id or "").strip().lower()
+    return text.startswith("seed-") or text == "seed"
+
+
+def _is_placeholder_platform(platform: str) -> bool:
+    return str(platform or "").strip().lower() == "seed"
+
+
+def delete_placeholder_jobs() -> int:
+    """Remove Seed / example.com demo rows so they never show in the jobs UI."""
+    if not mysql_configured():
+        return 0
+    conn = get_conn()
+    if conn is None:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {JOBS_TABLE} "
+                f"WHERE platform = %s OR source_id LIKE %s "
+                f"OR url LIKE %s OR url LIKE %s",
+                ("Seed", "seed-%", "%://jobs.example.com/%", "%://example.com/%"),
+            )
+            removed = int(cur.rowcount or 0)
+        if removed:
+            log.info("Removed %s Seed/placeholder job rows", removed)
+        return removed
+    except Exception:
+        close_conn()
+        log.exception("placeholder job cleanup failed")
+        return 0
+
+
 def _startup_maintenance() -> None:
     """Backfill and cleanup after uvicorn is already listening on port 9001."""
     global _EVERIFY_INDEX
     try:
+        delete_placeholder_jobs()
         backfill_listing_fields()
         _EVERIFY_INDEX = None
         from jobscraper.everify import load_rows_from_csv
@@ -943,6 +987,14 @@ def _row_from_item(job: dict) -> dict | None:
     company = _clip(job.get("company"), 255)
     if not source_id or not title or not company:
         return None
+    url = _clip(job.get("url"), 1000)
+    platform = _clip(job.get("platform"), 120, "Unknown")
+    if (
+        _is_placeholder_url(url)
+        or _is_placeholder_source(source_id)
+        or _is_placeholder_platform(platform)
+    ):
+        return None
     skills = _as_skills_json(job.get("skills"))
     description = str(job.get("description") or job.get("search_text") or "").strip()
     try:
@@ -958,9 +1010,9 @@ def _row_from_item(job: dict) -> dict | None:
         "skills": skills,
         "state": _clip(job.get("state"), 255),
         "location": _clip(job.get("location"), 512, "United States"),
-        "platform": _clip(job.get("platform"), 120, "Unknown"),
+        "platform": platform,
         "days_ago": max(days_ago, 0),
-        "url": _clip(job.get("url"), 1000),
+        "url": url,
         "description": description,
         "raw_description": _raw_description_json(job),
         "posted_at": _posted_mysql(job.get("posted_at")),
@@ -1277,7 +1329,12 @@ def load_jobs() -> list[dict]:
                 f"job_type, work_model, experience_level, "
                 f"years_experience, h1b_sponsorship, clearance_required, us_citizen_required, "
                 f"salary_min, salary_max, posted_at, e_verified, e_verify_name "
-                f"FROM {JOBS_TABLE} ORDER BY last_seen_at DESC"
+                f"FROM {JOBS_TABLE} "
+                f"WHERE platform <> %s "
+                f"AND (source_id IS NULL OR source_id NOT LIKE %s) "
+                f"AND url NOT LIKE %s AND url NOT LIKE %s "
+                f"ORDER BY last_seen_at DESC",
+                ("Seed", "seed-%", "%://jobs.example.com/%", "%://example.com/%"),
             )
             rows = cur.fetchall() or []
         load_jobs.last_error = None
