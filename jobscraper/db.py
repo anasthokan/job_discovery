@@ -404,6 +404,8 @@ def _ensure_job_columns(cur) -> None:
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
     _ensure_currency_column(cur, JOBS_TABLE, create=True)
     _ensure_currency_column(cur, "companies", create=False)
+    _ensure_required_defaults(cur, JOBS_TABLE, _JOBS_INSERT_COLUMNS)
+    _ensure_required_defaults(cur, "companies", _COMPANIES_INSERT_COLUMNS)
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -1062,16 +1064,128 @@ def _ensure_currency_column(cur, table: str, *, create: bool) -> None:
     if str(column.get("Null") or "").upper() == "YES" or column.get("Default") is not None:
         return
     col_type = str(column.get("Type") or "varchar(8)")
-    if not re.fullmatch(r"[A-Za-z0-9(),' ]+", col_type):
+    default_sql = _column_default_sql("currency", col_type)
+    if default_sql is None or not _safe_column_type(col_type):
         return
-    default_sql = "'USD'"
-    if col_type.lower().startswith("enum"):
-        options = re.findall(r"'([^']*)'", col_type)
-        if "USD" not in options and options:
-            default_sql = "'" + options[0].replace("'", "") + "'"
     cur.execute(
         f"ALTER TABLE {table} MODIFY COLUMN currency {col_type} NOT NULL DEFAULT {default_sql}"
     )
+
+
+_JOBS_INSERT_COLUMNS = {
+    "public_id",
+    "source_id",
+    "title",
+    "company",
+    "company_ref_id",
+    "skills",
+    "state",
+    "location",
+    "platform",
+    "days_ago",
+    "url",
+    "description",
+    "raw_description",
+    "posted_at",
+    "is_active",
+    "e_verified",
+    "e_verify_name",
+    "job_type",
+    "work_model",
+    "experience_level",
+    "years_experience",
+    "h1b_sponsorship",
+    "clearance_required",
+    "us_citizen_required",
+    "listing_inferred",
+    "salary_min",
+    "salary_max",
+    "salary_parsed",
+    "currency",
+    "first_seen_at",
+    "last_seen_at",
+    "created_at",
+    "updated_at",
+}
+
+_COMPANIES_INSERT_COLUMNS = {
+    "public_id",
+    "name",
+    "normalized_name",
+    "website",
+    "h1b_sponsor",
+    "sponsorship_notes",
+    "logo_url",
+    "created_at",
+    "updated_at",
+}
+
+
+def _safe_column_type(col_type: str) -> bool:
+    return re.fullmatch(r"[A-Za-z0-9(),' ]+", col_type or "") is not None
+
+
+def _column_default_sql(name: str, col_type: str) -> str | None:
+    """A literal MySQL can store when an INSERT omits a NOT NULL column."""
+    kind = (col_type or "").lower()
+    if name == "currency" and kind.startswith(("char", "varchar", "enum", "set", "text")):
+        if kind.startswith(("enum", "set")):
+            options = re.findall(r"'([^']*)'", col_type)
+            if "USD" in options:
+                return "'USD'"
+            if options:
+                return "'" + options[0].replace("'", "''") + "'"
+        return "'USD'"
+    if kind.startswith(("enum", "set")):
+        options = re.findall(r"'([^']*)'", col_type)
+        if not options:
+            return None
+        return "'" + options[0].replace("'", "''") + "'"
+    if kind.startswith(("char", "varchar", "binary", "varbinary")):
+        return "''"
+    if kind.startswith(("tinytext", "text", "mediumtext", "longtext", "tinyblob", "blob", "mediumblob", "longblob")):
+        return "('')"
+    if kind.startswith("json"):
+        return "(JSON_OBJECT())"
+    if kind.startswith(("tinyint", "smallint", "mediumint", "int", "bigint", "decimal", "numeric", "float", "double", "bit", "year", "bool")):
+        return "0"
+    if kind.startswith("datetime") or kind.startswith("timestamp"):
+        return "'1970-01-01 00:00:00'"
+    if kind.startswith("date"):
+        return "'1970-01-01'"
+    if kind.startswith("time"):
+        return "'00:00:00'"
+    return None
+
+
+def _ensure_required_defaults(cur, table: str, written: set[str]) -> list[str]:
+    """Give every omitted NOT NULL column a default so one shared table cannot fail the save."""
+    if not re.fullmatch(r"[A-Za-z0-9_]+", table):
+        return []
+    cur.execute(f"SHOW COLUMNS FROM {table}")
+    repaired = []
+    for column in cur.fetchall() or []:
+        name = str(column.get("Field") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+            continue
+        if name in written or name == "id":
+            continue
+        if str(column.get("Null") or "").upper() == "YES" or column.get("Default") is not None:
+            continue
+        extra = str(column.get("Extra") or "").lower()
+        if "auto_increment" in extra or "generated" in extra:
+            continue
+        col_type = str(column.get("Type") or "")
+        default_sql = _column_default_sql(name, col_type)
+        if default_sql is None or not _safe_column_type(col_type):
+            log.warning("Required column %s.%s has no default this scraper can set (%s)", table, name, col_type)
+            continue
+        cur.execute(
+            f"ALTER TABLE {table} MODIFY COLUMN `{name}` {col_type} NOT NULL DEFAULT {default_sql}"
+        )
+        repaired.append(name)
+        log.info("Set default on %s.%s so job saves can omit it", table, name)
+    return repaired
 
 
 def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
@@ -1132,6 +1246,8 @@ def upsert_jobs(jobs: list[dict]) -> int:
             with conn.cursor() as cur:
                 _ensure_currency_column(cur, JOBS_TABLE, create=True)
                 _ensure_currency_column(cur, "companies", create=False)
+                _ensure_required_defaults(cur, JOBS_TABLE, _JOBS_INSERT_COLUMNS)
+                _ensure_required_defaults(cur, "companies", _COMPANIES_INSERT_COLUMNS)
                 company_ids = _company_ids(
                     cur,
                     {row["company_key"]: row["company"] for row in rows if row["company_key"]},
