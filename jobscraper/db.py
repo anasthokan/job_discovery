@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS {JOBS_TABLE} (
   salary_min INT NULL,
   salary_max INT NULL,
   salary_parsed TINYINT(1) NOT NULL DEFAULT 0,
+  currency VARCHAR(8) NOT NULL DEFAULT 'USD',
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)
@@ -159,13 +160,13 @@ INSERT INTO {JOBS_TABLE} (
   public_id, source_id, title, company, company_ref_id, skills, state, location,
   platform, days_ago, url, description, raw_description, posted_at, is_active, e_verified, e_verify_name,
   job_type, work_model, experience_level, years_experience, h1b_sponsorship, clearance_required,
-  us_citizen_required, listing_inferred, salary_min, salary_max, salary_parsed,
+  us_citizen_required, listing_inferred, salary_min, salary_max, salary_parsed, currency,
   first_seen_at, last_seen_at, created_at, updated_at
 ) VALUES (
   %s, %s, %s, %s, %s, %s, %s, %s,
   %s, %s, %s, %s, %s, %s, 1, 'unknown', '',
   %s, %s, %s, %s, %s, %s,
-  %s, 1, %s, %s, 1, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
+  %s, 1, %s, %s, 1, %s, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), UTC_TIMESTAMP(6)
 ) AS new
 ON DUPLICATE KEY UPDATE
   title = new.title,
@@ -215,6 +216,7 @@ ON DUPLICATE KEY UPDATE
   salary_min = COALESCE(new.salary_min, {JOBS_TABLE}.salary_min),
   salary_max = COALESCE(new.salary_max, {JOBS_TABLE}.salary_max),
   salary_parsed = 1,
+  currency = new.currency,
   listing_inferred = 1,
   is_active = 1,
   last_seen_at = UTC_TIMESTAMP(6),
@@ -400,6 +402,8 @@ def _ensure_job_columns(cur) -> None:
         cur.execute(f"SHOW COLUMNS FROM {JOBS_TABLE} LIKE '{name}'")
         if not cur.fetchone():
             cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD COLUMN {name} {ddl}")
+    _ensure_currency_column(cur, JOBS_TABLE, create=True)
+    _ensure_currency_column(cur, "companies", create=False)
     try:
         cur.execute(f"ALTER TABLE {JOBS_TABLE} ADD KEY idx_jd_jobs_everify (e_verified)")
     except Exception:
@@ -1025,7 +1029,49 @@ def _salary_fields(job: dict) -> dict:
     from jobscraper.salary import salary_bounds
 
     salary_min, salary_max = salary_bounds(job)
-    return {"salary_min": salary_min, "salary_max": salary_max}
+    return {
+        "salary_min": salary_min,
+        "salary_max": salary_max,
+        "currency": _currency_code(job),
+    }
+
+
+def _currency_code(job: dict) -> str:
+    """ISO currency for the shared jobs.currency column. US listings default to USD."""
+    for key in ("currency", "salaryCurrency", "currency_code", "currencyCode"):
+        compact = re.sub(r"[\s.]", "", str(job.get(key) or "")).upper()
+        if compact in {"$", "US$"}:
+            return "USD"
+        if re.fullmatch(r"[A-Z]{3}", compact):
+            return compact
+    return "USD"
+
+
+def _ensure_currency_column(cur, table: str, *, create: bool) -> None:
+    """Make currency insertable. The shared table can require it with no default."""
+    if not re.fullmatch(r"[A-Za-z0-9_]+", table):
+        return
+    cur.execute(f"SHOW COLUMNS FROM {table} LIKE 'currency'")
+    column = cur.fetchone()
+    if not column:
+        if create:
+            cur.execute(
+                f"ALTER TABLE {table} ADD COLUMN currency VARCHAR(8) NOT NULL DEFAULT 'USD'"
+            )
+        return
+    if str(column.get("Null") or "").upper() == "YES" or column.get("Default") is not None:
+        return
+    col_type = str(column.get("Type") or "varchar(8)")
+    if not re.fullmatch(r"[A-Za-z0-9(),' ]+", col_type):
+        return
+    default_sql = "'USD'"
+    if col_type.lower().startswith("enum"):
+        options = re.findall(r"'([^']*)'", col_type)
+        if "USD" not in options and options:
+            default_sql = "'" + options[0].replace("'", "") + "'"
+    cur.execute(
+        f"ALTER TABLE {table} MODIFY COLUMN currency {col_type} NOT NULL DEFAULT {default_sql}"
+    )
 
 
 def _company_ids(cur, names: dict[str, str]) -> dict[str, int]:
@@ -1084,6 +1130,8 @@ def upsert_jobs(jobs: list[dict]) -> int:
     try:
         with _LOCK:
             with conn.cursor() as cur:
+                _ensure_currency_column(cur, JOBS_TABLE, create=True)
+                _ensure_currency_column(cur, "companies", create=False)
                 company_ids = _company_ids(
                     cur,
                     {row["company_key"]: row["company"] for row in rows if row["company_key"]},
@@ -1113,6 +1161,7 @@ def upsert_jobs(jobs: list[dict]) -> int:
                         row["us_citizen_required"],
                         row["salary_min"],
                         row["salary_max"],
+                        row["currency"],
                     )
                     for row in rows
                 ]

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   salary_min INT NULL,
   salary_max INT NULL,
   salary_parsed TINYINT(1) NOT NULL DEFAULT 0,
+  currency VARCHAR(8) NOT NULL DEFAULT 'USD',
   PRIMARY KEY (id),
   UNIQUE KEY uk_jobs_public_id (public_id),
   UNIQUE KEY uk_jobs_source_id (source_id)
